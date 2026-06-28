@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run from the repository root so that path-based re-staging (which uses
+# repo-root-relative paths from `git diff --cached --name-only`) works no
+# matter which subdirectory the script was invoked from. (M1)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "Error: not inside a git repository." >&2
+  exit 1
+}
+cd "$repo_root"
+
+# --- Loading spinner -------------------------------------------------------
+# Show an immediate "working" indicator so the user knows something is
+# happening while the (slow) Claude calls run. Writes to stderr.
+spinner_pid=""
+start_spinner() {
+  local msg="${1:-Working}"
+  # Stop any spinner that's still running so we never orphan a background
+  # subshell (which would keep clobbering the terminal after we exit).
+  stop_spinner
+  # Only animate when attached to a terminal.
+  if [ ! -t 2 ]; then
+    printf '%s...\n' "$msg" >&2
+    return
+  fi
+  (
+    # Frame array (not a byte-sliced string) so multibyte spinner glyphs
+    # render correctly regardless of locale, e.g. under LC_ALL=C. (L1)
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    while true; do
+      i=$(((i + 1) % ${#frames[@]}))
+      printf '\r\033[36m%s\033[0m %s... ' "${frames[$i]}" "$msg" >&2
+      sleep 0.1
+    done
+  ) &
+  spinner_pid=$!
+}
+stop_spinner() {
+  [ -n "$spinner_pid" ] || return 0
+  kill "$spinner_pid" >/dev/null 2>&1 || true
+  wait "$spinner_pid" 2>/dev/null || true
+  spinner_pid=""
+  [ -t 2 ] && printf '\r\033[K' >&2
+}
+trap stop_spinner EXIT
+# Clean up the spinner on interrupt too: backgrounded `&` commands ignore
+# SIGINT in a non-interactive shell, so without this the spinner can survive
+# a Ctrl-C. Exit with the conventional 128+SIGINT code. (H1)
+trap 'stop_spinner; exit 130' INT TERM
+
+# Immediate feedback right after launch.
+start_spinner "Staging changes"
+
+# Stage all changes
+git add -A
+
+# Nothing staged? done.
+if git diff --cached --quiet; then
+  stop_spinner
+  echo "Nothing to commit."
+  exit 0
+fi
+stop_spinner
+
+diff_output=$(git diff --cached)
+
+# Read the staged paths from NUL-delimited output into an array. This gives the
+# RAW bytes of every path: plain `--name-only` C-quotes any path with a newline
+# or non-ASCII char under the default core.quotePath=true, and that quoted form
+# would later break `git add -- "$path"` (the pathspec would be the literal
+# quoted string, not the real file). NUL output is never quoted.
+staged_files=()
+while IFS= read -r -d '' f; do
+  staged_files+=("$f")
+done < <(git diff --cached --name-only -z)
+
+# Newline-joined list, used both for the prompt text and the equality check.
+files=$(printf '%s\n' "${staged_files[@]}")
+
+# Detect any path containing an embedded newline. The grouping logic below is
+# newline-delimited (sort/compare and the read loop), so such a path can't be
+# represented -> force the single-commit fallback (which never re-adds by path,
+# so it handles every path safely). (M3)
+valid=true
+for f in "${staged_files[@]}"; do
+  case $f in
+    *$'\n'*) valid=false; break;;
+  esac
+done
+
+plan=""
+if [ "$valid" = true ]; then
+  # Ask Claude to group the changed files into one or more logical commits.
+  prompt="You are grouping a staged git diff into one or more logically cohesive commits.
+
+The complete list of changed files (these exact strings are the ONLY valid paths):
+$files
+
+Rules:
+- Put files that belong to the same logical change in the same commit.
+- Create SEPARATE commits for changes that are logically distinct (e.g. a bugfix
+  vs a new feature vs docs vs config/chore).
+- Every file listed above MUST appear in exactly ONE commit. Never invent, rename,
+  split, or omit a path.
+- Prefer fewer commits; only split when changes are genuinely independent.
+- Each message: conventional commit style (feat:, fix:, refactor:, docs:, chore:,
+  etc), first line under 72 chars. Add a blank line then bullet points only if it
+  helps.
+
+Output ONLY valid JSON, nothing else, in exactly this shape:
+{\"commits\":[{\"message\":\"<msg>\",\"files\":[\"path1\",\"path2\"]}]}"
+
+  start_spinner "Asking Claude to group commits"
+  # Detect a missing/failing `claude` (e.g. exit 127) instead of letting the
+  # command substitution silently kill the script under set -e. (M4)
+  if ! plan=$(printf '%s' "$diff_output" | claude --print "$prompt"); then
+    stop_spinner
+    echo "Error: 'claude' failed or is not available; cannot group commits." >&2
+    echo "Your changes remain staged — commit them manually." >&2
+    exit 1
+  fi
+  stop_spinner
+
+  # Strip an accidental leading/trailing ``` fence *line* only — never a global
+  # substitution, which would corrupt a legitimate ``` inside a JSON string. (L2)
+  plan=$(printf '%s\n' "$plan" \
+    | sed -e '1{/^```json$/d;}' -e '1{/^```$/d;}' -e '${/^```$/d;}')
+
+  # Validate the plan:
+  #  - .commits is a non-empty array, AND every commit has a non-empty files
+  #    array and a non-empty string message (closes the files:[] half-commit
+  #    and null/empty-message paths). (C2, H2)
+  #  - the union of all listed files exactly equals the staged file set, with
+  #    tolerant extraction so a malformed plan flips the flag instead of
+  #    killing the script. (C1)
+  if ! printf '%s' "$plan" | jq -e '
+        (.commits | type == "array") and (.commits | length > 0)
+        and all(.commits[];
+              (.files | type == "array") and (.files | length > 0)
+              and (.message | type == "string") and (.message | test("\\S")))
+      ' >/dev/null 2>&1; then
+    valid=false
+  else
+    planned=$(printf '%s' "$plan" | jq -r '[.commits[].files?[]?] | .[]' 2>/dev/null | sort) || valid=false
+    actual=$(printf '%s\n' "$files" | sort)
+    [ "$planned" = "$actual" ] || valid=false
+  fi
+fi
+
+if [ "$valid" = false ]; then
+  echo "Grouping unavailable — falling back to a single commit."
+  start_spinner "Generating commit message"
+  if ! message=$(printf '%s' "$diff_output" | claude --print \
+    "Generate a concise git commit message for these changes. Output ONLY the commit message, nothing else. Use conventional commit style (feat:, fix:, refactor:, docs:, chore:, etc). Keep the first line under 72 chars. If there are multiple changes, add a blank line then bullet points."); then
+    stop_spinner
+    echo "Error: 'claude' failed or is not available; cannot generate a commit message." >&2
+    echo "Your changes remain staged — commit them manually." >&2
+    exit 1
+  fi
+  stop_spinner
+  # Abort with a clear error on an empty/whitespace-only message instead of
+  # letting `git commit -m ""` fail opaquely under set -e. Strip CR too, since
+  # git's own message cleanup would trim a CR-only message to empty. (H2)
+  if [ -z "${message//[$' \t\r\n']/}" ]; then
+    echo "Error: Claude returned an empty commit message; aborting." >&2
+    echo "Your changes remain staged — commit them manually." >&2
+    exit 1
+  fi
+  echo "---"; echo "$message"; echo "---"
+  if ! git commit -m "$message"; then
+    echo "Error: git commit failed." >&2
+    echo "Your changes remain staged — commit them manually." >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# Commit each group in its own commit. The plan is already validated above, so
+# these jq reads should not fail — but guard them anyway so a surprise non-zero
+# can't silently abort the script under set -e. Nothing is committed yet here,
+# so a clean exit just leaves everything staged.
+if ! count=$(printf '%s' "$plan" | jq '.commits | length'); then
+  echo "Error: failed to read the commit plan; your changes remain staged." >&2
+  exit 1
+fi
+echo "Creating $count commit(s)."
+created=0
+for i in $(seq 0 $((count - 1))); do
+  if ! msg=$(printf '%s' "$plan" | jq -r ".commits[$i].message"); then
+    echo "Error: failed to read message for commit $((i + 1)) of $count." >&2
+    echo "$created commit(s) were created successfully before the failure." >&2
+    echo "Re-staging all remaining changes so nothing is lost." >&2
+    git add -A
+    exit 1
+  fi
+  if ! git reset -q; then
+    echo "Error: failed to reset the index before commit $((i + 1)) of $count." >&2
+    echo "$created commit(s) were created successfully before the failure." >&2
+    echo "Re-staging all remaining changes so nothing is lost." >&2
+    git add -A
+    exit 1
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] && git add -- "$f"
+  done < <(printf '%s' "$plan" | jq -r ".commits[$i].files[]")
+  echo "---"; echo "$msg"; echo "---"
+  # On a mid-loop failure, report what was committed and re-stage everything
+  # so the user is never left in a confusing half-committed state. (M2)
+  if ! git commit -m "$msg"; then
+    echo "Error: commit $((i + 1)) of $count failed." >&2
+    echo "$created commit(s) were created successfully before the failure." >&2
+    echo "Re-staging all remaining changes so nothing is lost." >&2
+    git add -A
+    exit 1
+  fi
+  created=$((created + 1))
+done
