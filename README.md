@@ -9,6 +9,9 @@ they're easy to tab-complete and never collide with system commands.
 
 - **`,auto-git`** — stages all changes and asks Claude (`claude --print`) to group the staged
   diff into one or more logically cohesive conventional commits. Run it from inside any git repo.
+- **`,git-status`** — read-only "is everything committed?" check. Clean tree: one line + last
+  3 commits. Dirty tree: change counts, a one-sentence AI summary of the changes (Claude haiku,
+  falls back to a plain file list when `claude` is unavailable), and the last 3 commits.
 
 ### Setup on a new machine
 

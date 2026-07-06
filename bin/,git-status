@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ,git-status — answer "is everything committed?" at a glance.
+#
+# Clean tree:  one line + last 3 commits.
+# Dirty tree:  deterministic change counts, a one-sentence AI summary of the
+#              changes (claude --print --model haiku), then last 3 commits.
+#
+# Strictly read-only: never touches the index or the worktree.
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "Error: not inside a git repository." >&2
+  exit 1
+}
+
+# --- Colors (TTY only) -------------------------------------------------------
+if [ -t 1 ]; then
+  green=$'\033[32m'; yellow=$'\033[33m'; dim=$'\033[2m'; reset=$'\033[0m'
+else
+  green=""; yellow=""; dim=""; reset=""
+fi
+
+# --- Loading spinner (same pattern as ,auto-git) -----------------------------
+spinner_pid=""
+start_spinner() {
+  local msg="${1:-Working}"
+  stop_spinner
+  if [ ! -t 2 ]; then
+    printf '%s...\n' "$msg" >&2
+    return
+  fi
+  (
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    while true; do
+      i=$(((i + 1) % ${#frames[@]}))
+      printf '\r\033[36m%s\033[0m %s... ' "${frames[$i]}" "$msg" >&2
+      sleep 0.1
+    done
+  ) &
+  spinner_pid=$!
+}
+stop_spinner() {
+  [ -n "$spinner_pid" ] || return 0
+  kill "$spinner_pid" >/dev/null 2>&1 || true
+  wait "$spinner_pid" 2>/dev/null || true
+  spinner_pid=""
+  [ -t 2 ] && printf '\r\033[K' >&2
+}
+trap stop_spinner EXIT
+trap 'stop_spinner; exit 130' INT TERM
+
+# --- Recent commits helper ---------------------------------------------------
+print_recent_commits() {
+  if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    git log -3 --oneline --no-color
+  else
+    echo "(no commits yet)"
+  fi
+}
+
+# --- Status ------------------------------------------------------------------
+porcelain=$(git status --porcelain=v1)
+
+if [ -z "$porcelain" ]; then
+  printf '%s✓%s All committed.\n' "$green" "$reset"
+  print_recent_commits
+  exit 0
+fi
+
+# Dirty tree: count unique paths by change type. A staged+unstaged file is one
+# change; type precedence for mixed XY states: untracked > deleted > renamed >
+# added > modified (evaluated per-entry from the two status columns).
+total=0 modified=0 added=0 deleted=0 renamed=0 untracked=0
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  xy=${line:0:2}
+  total=$((total + 1))
+  case $xy in
+    '??') untracked=$((untracked + 1));;
+    *D*)  deleted=$((deleted + 1));;
+    *R*)  renamed=$((renamed + 1));;
+    A*)   added=$((added + 1));;
+    *)    modified=$((modified + 1));;
+  esac
+done <<<"$porcelain"
+
+breakdown=""
+append_part() {
+  [ "$1" -gt 0 ] || return 0
+  breakdown="${breakdown:+$breakdown, }$1 $2"
+}
+append_part "$modified" "modified"
+append_part "$added" "added"
+append_part "$deleted" "deleted"
+append_part "$renamed" "renamed"
+append_part "$untracked" "untracked"
+
+plural="changes"; [ "$total" -eq 1 ] && plural="change"
+printf '%s●%s %d uncommitted %s (%s)\n' "$yellow" "$reset" "$total" "$plural" "$breakdown"
+
+# Show the (instant) recent commits first, then fill in the slower AI summary
+# below so the user isn't left staring at a spinner with nothing on screen.
+echo
+echo "Recent commits:"
+print_recent_commits
+
+# --- AI one-liner ------------------------------------------------------------
+# Feed the tracked diff plus the untracked file list (git diff HEAD misses
+# untracked files) to haiku, capped so huge diffs stay fast.
+build_change_context() {
+  if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    git diff HEAD --no-color
+  else
+    git diff --cached --no-color
+  fi
+  local others
+  others=$(git ls-files --others --exclude-standard)
+  if [ -n "$others" ]; then
+    echo
+    echo "Untracked files:"
+    printf '%s\n' "$others"
+  fi
+}
+
+summary=""
+start_spinner "Summarizing changes"
+if ! summary=$(build_change_context | head -c 50000 | claude --print --model haiku \
+  "Summarize these uncommitted changes in ONE short sentence (max ~20 words). Output only the sentence." 2>/dev/null); then
+  summary=""
+fi
+stop_spinner
+
+echo
+if [ -n "${summary//[$' \t\r\n']/}" ]; then
+  printf '  ↳ %s\n' "$summary"
+else
+  # Fallback: claude unavailable or returned nothing — list the files instead.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    xy=${line:0:2}
+    path=${line:3}
+    case $xy in
+      '??') sym="?";;
+      *D*)  sym="-";;
+      *R*)  sym=">";;
+      A*)   sym="+";;
+      *)    sym="~";;
+    esac
+    printf '  %s%s%s %s\n' "$dim" "$sym" "$reset" "$path"
+  done <<<"$porcelain"
+fi
