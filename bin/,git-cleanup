@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# ,git-cleanup — delete local branches already merged into the main branch.
+#
+# Lists local branches whose commits are fully contained in the main branch
+# (default: "main") and deletes them with `git branch -d`. The current branch,
+# the main branch, "master", "production" and "dev" are always kept. Because it
+# uses `-d` (not `-D`),
+# Git refuses to delete any branch that is not fully merged, so unmerged work is
+# never lost.
+
+set -euo pipefail
+
+MAIN="main"
+
+usage() {
+    cat <<'EOF'
+Usage: ,git-cleanup [--main <branch>]
+
+Delete local branches that are already merged into the main branch.
+
+Options:
+  --main <branch>   Name of the main branch to compare against (default: main)
+  -h, --help        Show this help and exit
+
+The current branch, the main branch, "master", "production" and "dev"
+are always kept. Only fully merged branches are removed (uses `git branch -d`).
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --main)
+            if [ $# -lt 2 ]; then
+                echo "Error: --main requires a branch name." >&2
+                exit 1
+            fi
+            MAIN="$2"
+            shift 2
+            ;;
+        *)
+            echo "Error: unknown argument '$1'." >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Not a git repository (or any of the parent directories)." >&2
+    exit 1
+fi
+
+if ! git show-ref --verify --quiet "refs/heads/$MAIN"; then
+    echo "Main branch '$MAIN' does not exist. Use --main <branch> to set it." >&2
+    exit 1
+fi
+
+branches="$(git branch --merged "$MAIN" | grep -v "^\*\|[[:space:]]$MAIN\$\|[[:space:]]master\$\|[[:space:]]production\$\|[[:space:]]dev\$" || true)"
+
+if [ -z "$branches" ]; then
+    echo "No merged branches to clean up."
+    exit 0
+fi
+
+echo "$branches" | xargs -r -n1 git branch -d
+echo "Cleaned up merged branches."
