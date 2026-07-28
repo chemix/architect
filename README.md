@@ -9,6 +9,10 @@ they're easy to tab-complete and never collide with system commands.
 
 - **`,auto-git`** — stages all changes and asks Claude (`claude --print`) to group the staged
   diff into one or more logically cohesive conventional commits. Run it from inside any git repo.
+  `,auto-git --help` for usage; `,auto-git --debug` when it misbehaves — it reports each Claude
+  call with its exit code, stdout and stderr, checks the OAuth token expiry, explains why a
+  commit plan was rejected, and collects the Claude CLI's own API log (`~/.claude/debug/`) into
+  a directory whose path it prints.
 - **`,git-status`** — read-only "is everything committed?" check. Clean tree: one line + last
   3 commits. Dirty tree: change counts, a one-sentence AI summary of the changes (Claude haiku,
   falls back to a plain file list when `claude` is unavailable), and the last 3 commits.
