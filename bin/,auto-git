@@ -1,24 +1,150 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run from the repository root so that path-based re-staging (which uses
-# repo-root-relative paths from `git diff --cached --name-only`) works no
-# matter which subdirectory the script was invoked from. (M1)
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "Error: not inside a git repository." >&2
-  exit 1
-}
-cd "$repo_root"
+# ,auto-git — stage everything, ask Claude to split the staged diff into
+# logically cohesive commits, and create them.
+#
+# Run with --help for usage and with --debug when it misbehaves: every Claude
+# invocation is then reported with its exit code, stdout and stderr, so a
+# failure (expired token, rate limit, oversized prompt, ...) is actually
+# readable instead of being swallowed by the spinner.
 
-# --- Loading spinner -------------------------------------------------------
+prog=${0##*/}
+
+usage() {
+  printf 'Usage: %s [options]\n\n' "$prog"
+  cat <<'EOF'
+Stages every change in the current repository, asks Claude to split the staged
+diff into logically cohesive commits, and creates those commits. If Claude
+cannot produce a usable grouping, falls back to a single commit with a
+Claude-generated message.
+
+Options:
+  -h, --help            Show this help and exit.
+  -d, --debug[=FILTER]  Verbose diagnostics on stderr: tool versions, auth token
+                        expiry, staged file and diff sizes, the exact Claude
+                        invocations with their exit codes and raw stdout/stderr,
+                        and the reason a commit plan was rejected. Disables the
+                        spinner and saves every prompt and response into a debug
+                        directory whose path is printed.
+                        Also runs the Claude CLI under its own --debug (category
+                        filter FILTER, default "api") and collects the resulting
+                        API log, which is where an expired token, a rate limit
+                        or an oversized request actually shows up. Use
+                        --debug=none to skip that pass-through.
+
+Environment:
+  AUTO_GIT_DEBUG=1           Same as --debug.
+  AUTO_GIT_CLAUDE_DEBUG=api  Same as the FILTER above.
+
+Exit status:
+    0  commits created, or nothing to commit
+    1  a step failed — your changes are left staged
+    2  bad command line
+  130  interrupted
+
+Requires 'claude' in PATH. 'jq' is needed for multi-commit grouping; without it
+the script falls back to a single commit.
+EOF
+}
+
+# --- Options ----------------------------------------------------------------
+debug=0
+claude_debug_filter=${AUTO_GIT_CLAUDE_DEBUG:-}
+case "${AUTO_GIT_DEBUG:-}" in 1 | true | yes | on) debug=1 ;; esac
+[ -n "$claude_debug_filter" ] && debug=1
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -d | --debug)
+      debug=1
+      shift
+      ;;
+    -d=* | --debug=*)
+      debug=1
+      claude_debug_filter=${1#*=}
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      printf "Error: unrecognized argument: %s\n\n" "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+if [ $# -gt 0 ]; then
+  printf "Error: unrecognized argument: %s\n\n" "$1" >&2
+  usage >&2
+  exit 2
+fi
+
+# Debugging without the CLI's own API log is only half a diagnosis, so opt in by
+# default; --debug=none opts back out.
+[ "$debug" -eq 1 ] && [ -z "$claude_debug_filter" ] && claude_debug_filter=api
+case $claude_debug_filter in none | off) claude_debug_filter="" ;; esac
+claude_debug_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/debug"
+
+# --- Debug plumbing ----------------------------------------------------------
+if [ -t 2 ]; then dim=$'\033[2m'; reset=$'\033[0m'; else dim=""; reset=""; fi
+
+dbg() {
+  [ "$debug" -eq 1 ] || return 0
+  printf '%s[debug %3ds]%s %s\n' "$dim" "$SECONDS" "$reset" "$*" >&2
+}
+
+# Directory holding the full prompts/responses of every Claude call. Created
+# lazily, deliberately NOT removed on exit so it can be inspected afterwards.
+dbg_dir=""
+init_dbg_dir() {
+  [ "$debug" -eq 1 ] || return 0
+  [ -z "$dbg_dir" ] || return 0
+  dbg_dir=$(mktemp -d "${TMPDIR:-/tmp}/auto-git-debug-XXXXXX")
+  dbg "debug artifacts: $dbg_dir"
+}
+
+# Print a captured stdout/stderr block, indented and (optionally) truncated.
+show_block() {
+  local title=$1 content=$2 limit=$3 n
+  [ -n "${content//[$' \t\r\n']/}" ] || return 0
+  printf '  --- %s ---\n' "$title" >&2
+  if [ "$limit" -gt 0 ]; then
+    n=$(printf '%s\n' "$content" | wc -l)
+    { printf '%s\n' "$content" | head -n "$limit" | sed 's/^/  | /' >&2; } || true
+    if [ "$n" -gt "$limit" ]; then
+      printf '  | ... (%d more lines)\n' "$((n - limit))" >&2
+    fi
+  else
+    printf '%s\n' "$content" | sed 's/^/  | /' >&2
+  fi
+  printf '  ---\n' >&2
+  return 0
+}
+
+# --- Temp files --------------------------------------------------------------
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/auto-git-XXXXXX")
+
+# --- Loading spinner ---------------------------------------------------------
 # Show an immediate "working" indicator so the user knows something is
-# happening while the (slow) Claude calls run. Writes to stderr.
+# happening while the (slow) Claude calls run. Writes to stderr. Suppressed in
+# debug mode, where it would clobber the diagnostics.
 spinner_pid=""
 start_spinner() {
   local msg="${1:-Working}"
   # Stop any spinner that's still running so we never orphan a background
   # subshell (which would keep clobbering the terminal after we exit).
   stop_spinner
+  if [ "$debug" -eq 1 ]; then
+    dbg "$msg..."
+    return
+  fi
   # Only animate when attached to a terminal.
   if [ ! -t 2 ]; then
     printf '%s...\n' "$msg" >&2
@@ -43,12 +169,170 @@ stop_spinner() {
   wait "$spinner_pid" 2>/dev/null || true
   spinner_pid=""
   [ -t 2 ] && printf '\r\033[K' >&2
+  return 0
 }
-trap stop_spinner EXIT
+cleanup() {
+  stop_spinner
+  [ -n "$tmp_dir" ] && rm -rf "$tmp_dir"
+  if [ -n "$dbg_dir" ]; then
+    printf '%s[debug]%s artifacts kept in %s\n' "$dim" "$reset" "$dbg_dir" >&2
+  fi
+  return 0
+}
+trap cleanup EXIT
 # Clean up the spinner on interrupt too: backgrounded `&` commands ignore
 # SIGINT in a non-interactive shell, so without this the spinner can survive
 # a Ctrl-C. Exit with the conventional 128+SIGINT code. (H1)
 trap 'stop_spinner; exit 130' INT TERM
+
+# --- Environment diagnostics -------------------------------------------------
+report_environment() {
+  [ "$debug" -eq 1 ] || return 0
+  dbg "bash $BASH_VERSION on $(uname -sr 2>/dev/null || echo unknown)"
+  if command -v claude >/dev/null 2>&1; then
+    dbg "claude: $(command -v claude) — version $(claude --version 2>&1 | head -n1)"
+  else
+    dbg "claude: NOT FOUND in PATH"
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    dbg "jq: $(command -v jq) — $(jq --version 2>&1 | head -n1)"
+  else
+    dbg "jq: NOT FOUND in PATH (multi-commit grouping will be skipped)"
+  fi
+  [ -n "$claude_debug_filter" ] && dbg "passing --debug '$claude_debug_filter' through to the claude CLI (logs land in $claude_debug_dir)"
+  report_auth
+  return 0
+}
+
+# Answer "is my Claude login still valid?" without ever printing the token.
+report_auth() {
+  local cred exp exp_s now_s
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    dbg "auth: ANTHROPIC_API_KEY is set in the environment (${#ANTHROPIC_API_KEY} chars)"
+  fi
+  cred="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+  if [ ! -r "$cred" ]; then
+    dbg "auth: no readable credentials file at $cred (token may live in a keychain, or an API key is in use)"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    dbg "auth: $cred exists but jq is missing, cannot read its expiry"
+    return 0
+  fi
+  exp=$(jq -r '.claudeAiOauth.expiresAt // empty' "$cred" 2>/dev/null) || exp=""
+  if [ -z "$exp" ]; then
+    dbg "auth: $cred has no claudeAiOauth.expiresAt field"
+    return 0
+  fi
+  exp_s=$((exp / 1000))
+  now_s=$(date +%s)
+  if [ "$exp_s" -le "$now_s" ]; then
+    dbg "auth: OAuth token EXPIRED $(((now_s - exp_s) / 3600))h ago (at $(date -d "@$exp_s" 2>/dev/null || echo "$exp_s")) — the CLI normally refreshes it silently; if the calls below fail, run 'claude' once interactively and /login"
+  else
+    dbg "auth: OAuth token valid for another $(((exp_s - now_s) / 3600))h (until $(date -d "@$exp_s" 2>/dev/null || echo "$exp_s"))"
+  fi
+  return 0
+}
+
+# --- Claude invocation -------------------------------------------------------
+# run_claude <label> <stdin-file> <prompt>
+# Sets: claude_out, claude_err, claude_status. Never lets Claude write straight
+# to the terminal — its stderr is captured so the spinner cannot eat it.
+claude_out=""
+claude_err=""
+claude_status=0
+claude_log="" # path to the CLI's own --debug log for the last call, if captured
+run_claude() {
+  local label=$1 stdin_file=$2 prompt=$3
+  local out_file="$tmp_dir/$label.stdout" err_file="$tmp_dir/$label.stderr"
+  local marker="$tmp_dir/$label.marker"
+  local argv=(claude --print)
+  local started=$SECONDS
+
+  [ -n "$claude_debug_filter" ] && argv+=(--debug "$claude_debug_filter")
+
+  if [ "$debug" -eq 1 ]; then
+    init_dbg_dir
+    printf '%s' "$prompt" >"$dbg_dir/$label.prompt.txt"
+    cp "$stdin_file" "$dbg_dir/$label.stdin.txt"
+    dbg "running: ${argv[*]} <prompt: ${#prompt} chars> < $label.stdin.txt ($(wc -c <"$stdin_file" | tr -d ' ') bytes)"
+  fi
+
+  # Timestamp reference for picking out the log file this call creates.
+  claude_log=""
+  : >"$marker"
+
+  claude_status=0
+  "${argv[@]}" "$prompt" <"$stdin_file" >"$out_file" 2>"$err_file" || claude_status=$?
+  claude_out=$(cat "$out_file")
+  claude_err=$(cat "$err_file")
+
+  # `claude --debug` writes nothing to our stderr; it logs to
+  # ~/.claude/debug/<uuid>.txt. That file is where an auth failure, a rate limit
+  # or an oversized request is actually spelled out, so keep a copy.
+  if [ -n "$claude_debug_filter" ] && [ -d "$claude_debug_dir" ]; then
+    local found
+    found=$(find "$claude_debug_dir" -maxdepth 1 -type f -name '*.txt' -newer "$marker" -print 2>/dev/null | head -n1) || found=""
+    if [ -n "$found" ]; then
+      init_dbg_dir
+      claude_log="$dbg_dir/$label.claude-debug.log"
+      cp "$found" "$claude_log"
+      dbg "claude[$label] CLI debug log: $found -> $claude_log ($(wc -l <"$claude_log" | tr -d ' ') lines)"
+    else
+      dbg "claude[$label] produced no CLI debug log under $claude_debug_dir"
+    fi
+  fi
+
+  if [ "$debug" -eq 1 ]; then
+    cp "$out_file" "$dbg_dir/$label.stdout.txt"
+    cp "$err_file" "$dbg_dir/$label.stderr.txt"
+    dbg "claude[$label] exited $claude_status after $((SECONDS - started))s (stdout ${#claude_out} chars, stderr ${#claude_err} chars)"
+    show_block "claude[$label] stdout" "$claude_out" 0
+    show_block "claude[$label] stderr" "$claude_err" 40
+  fi
+  return 0
+}
+
+# Pull the interesting lines out of a captured CLI debug log.
+show_claude_log_errors() {
+  [ -n "$claude_log" ] && [ -r "$claude_log" ] || return 0
+  local hits
+  hits=$(grep -inE 'error|expired|unauthor|forbidden|rate.?limit|overloaded|retry|refresh|too (long|large|many)|401|403|429|5[0-9][0-9] ' "$claude_log" | tail -n 25) || hits=""
+  show_block "claude CLI debug log — matching lines ($claude_log)" "$hits" 0
+  return 0
+}
+
+# Explain a failed run_claude as loudly as the situation deserves.
+report_claude_failure() {
+  local what=$1
+  echo "Error: 'claude' failed while $what (exit status $claude_status)." >&2
+  case $claude_status in
+    127) echo "  'claude' was not found in PATH." >&2 ;;
+    130 | 143) echo "  The call was interrupted." >&2 ;;
+  esac
+  if [ "$debug" -eq 1 ]; then
+    show_claude_log_errors
+    echo "  Full stdout/stderr are above and in $dbg_dir." >&2
+  else
+    show_block "claude stderr" "$claude_err" 20
+    show_block "claude stdout" "$claude_out" 20
+    echo "  Re-run with --debug for full diagnostics, including the Claude CLI's own API log." >&2
+  fi
+  return 0
+}
+
+# --- Repository --------------------------------------------------------------
+# Run from the repository root so that path-based re-staging (which uses
+# repo-root-relative paths from `git diff --cached --name-only`) works no
+# matter which subdirectory the script was invoked from. (M1)
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "Error: not inside a git repository." >&2
+  exit 1
+}
+cd "$repo_root"
+
+report_environment
+dbg "repo root: $repo_root"
 
 # Immediate feedback right after launch.
 start_spinner "Staging changes"
@@ -64,7 +348,17 @@ if git diff --cached --quiet; then
 fi
 stop_spinner
 
-diff_output=$(git diff --cached)
+if ! command -v claude >/dev/null 2>&1; then
+  echo "Error: 'claude' is not in PATH; cannot generate commit messages." >&2
+  echo "Your changes remain staged — commit them manually." >&2
+  exit 1
+fi
+
+# The staged diff goes to Claude on stdin. Keep it in a file rather than a
+# variable so nothing is mangled and the byte count is easy to report.
+diff_file="$tmp_dir/staged.diff"
+git diff --cached >"$diff_file"
+dbg "staged diff: $(wc -c <"$diff_file" | tr -d ' ') bytes, $(wc -l <"$diff_file" | tr -d ' ') lines"
 
 # Read the staged paths from NUL-delimited output into an array. This gives the
 # RAW bytes of every path: plain `--name-only` C-quotes any path with a newline
@@ -78,17 +372,28 @@ done < <(git diff --cached --name-only -z)
 
 # Newline-joined list, used both for the prompt text and the equality check.
 files=$(printf '%s\n' "${staged_files[@]}")
+dbg "staged files: ${#staged_files[@]}"
 
 # Detect any path containing an embedded newline. The grouping logic below is
 # newline-delimited (sort/compare and the read loop), so such a path can't be
 # represented -> force the single-commit fallback (which never re-adds by path,
 # so it handles every path safely). (M3)
 valid=true
+fallback_reason=""
 for f in "${staged_files[@]}"; do
   case $f in
-    *$'\n'*) valid=false; break;;
+    *$'\n'*)
+      valid=false
+      fallback_reason="a staged path contains a newline"
+      break
+      ;;
   esac
 done
+
+if [ "$valid" = true ] && ! command -v jq >/dev/null 2>&1; then
+  valid=false
+  fallback_reason="'jq' is not installed"
+fi
 
 plan=""
 if [ "$valid" = true ]; then
@@ -115,18 +420,19 @@ Output ONLY valid JSON, nothing else, in exactly this shape:
   start_spinner "Asking Claude to group commits"
   # Detect a missing/failing `claude` (e.g. exit 127) instead of letting the
   # command substitution silently kill the script under set -e. (M4)
-  if ! plan=$(printf '%s' "$diff_output" | claude --print "$prompt"); then
-    stop_spinner
-    echo "Error: 'claude' failed or is not available; cannot group commits." >&2
+  run_claude group "$diff_file" "$prompt"
+  stop_spinner
+  if [ "$claude_status" -ne 0 ]; then
+    report_claude_failure "grouping the staged diff into commits"
     echo "Your changes remain staged — commit them manually." >&2
     exit 1
   fi
-  stop_spinner
+  plan=$claude_out
 
   # Strip an accidental leading/trailing ``` fence *line* only — never a global
   # substitution, which would corrupt a legitimate ``` inside a JSON string. (L2)
-  plan=$(printf '%s\n' "$plan" \
-    | sed -e '1{/^```json$/d;}' -e '1{/^```$/d;}' -e '${/^```$/d;}')
+  plan=$(printf '%s\n' "$plan" |
+    sed -e '1{/^```json$/d;}' -e '1{/^```$/d;}' -e '${/^```$/d;}')
 
   # Validate the plan:
   #  - .commits is a non-empty array, AND every commit has a non-empty files
@@ -142,33 +448,50 @@ Output ONLY valid JSON, nothing else, in exactly this shape:
               and (.message | type == "string") and (.message | test("\\S")))
       ' >/dev/null 2>&1; then
     valid=false
+    fallback_reason="Claude's reply is not a valid commit plan"
+    dbg "plan rejected: schema check failed"
+    [ "$debug" -eq 1 ] && show_block "rejected plan" "$plan" 0
   else
     planned=$(printf '%s' "$plan" | jq -r '[.commits[].files?[]?] | .[]' 2>/dev/null | sort) || valid=false
     actual=$(printf '%s\n' "$files" | sort)
-    [ "$planned" = "$actual" ] || valid=false
+    if [ "$planned" != "$actual" ]; then
+      valid=false
+      fallback_reason="the plan does not cover exactly the staged files"
+      if [ "$debug" -eq 1 ]; then
+        dbg "plan rejected: planned file set != staged file set"
+        show_block "planned but not staged" "$(comm -23 <(printf '%s\n' "$planned") <(printf '%s\n' "$actual"))" 0
+        show_block "staged but not planned" "$(comm -13 <(printf '%s\n' "$planned") <(printf '%s\n' "$actual"))" 0
+      fi
+    fi
   fi
 fi
 
 if [ "$valid" = false ]; then
-  echo "Grouping unavailable — falling back to a single commit."
+  echo "Grouping unavailable${fallback_reason:+ ($fallback_reason)} — falling back to a single commit."
   start_spinner "Generating commit message"
-  if ! message=$(printf '%s' "$diff_output" | claude --print \
-    "Generate a concise git commit message for these changes. Output ONLY the commit message, nothing else. Use conventional commit style (feat:, fix:, refactor:, docs:, chore:, etc). Keep the first line under 72 chars. If there are multiple changes, add a blank line then bullet points."); then
-    stop_spinner
-    echo "Error: 'claude' failed or is not available; cannot generate a commit message." >&2
+  run_claude message "$diff_file" \
+    "Generate a concise git commit message for these changes. Output ONLY the commit message, nothing else. Use conventional commit style (feat:, fix:, refactor:, docs:, chore:, etc). Keep the first line under 72 chars. If there are multiple changes, add a blank line then bullet points."
+  stop_spinner
+  if [ "$claude_status" -ne 0 ]; then
+    report_claude_failure "generating a commit message"
     echo "Your changes remain staged — commit them manually." >&2
     exit 1
   fi
-  stop_spinner
+  message=$claude_out
   # Abort with a clear error on an empty/whitespace-only message instead of
   # letting `git commit -m ""` fail opaquely under set -e. Strip CR too, since
   # git's own message cleanup would trim a CR-only message to empty. (H2)
   if [ -z "${message//[$' \t\r\n']/}" ]; then
     echo "Error: Claude returned an empty commit message; aborting." >&2
+    show_block "claude stderr" "$claude_err" 20
+    show_claude_log_errors
+    [ "$debug" -eq 1 ] || echo "  Re-run with --debug for full diagnostics, including the Claude CLI's own API log." >&2
     echo "Your changes remain staged — commit them manually." >&2
     exit 1
   fi
-  echo "---"; echo "$message"; echo "---"
+  echo "---"
+  echo "$message"
+  echo "---"
   if ! git commit -m "$message"; then
     echo "Error: git commit failed." >&2
     echo "Your changes remain staged — commit them manually." >&2
@@ -205,7 +528,10 @@ for i in $(seq 0 $((count - 1))); do
   while IFS= read -r f; do
     [ -n "$f" ] && git add -- "$f"
   done < <(printf '%s' "$plan" | jq -r ".commits[$i].files[]")
-  echo "---"; echo "$msg"; echo "---"
+  dbg "commit $((i + 1))/$count stages: $(printf '%s' "$plan" | jq -r ".commits[$i].files | join(\", \")")"
+  echo "---"
+  echo "$msg"
+  echo "---"
   # On a mid-loop failure, report what was committed and re-stage everything
   # so the user is never left in a confusing half-committed state. (M2)
   if ! git commit -m "$msg"; then
