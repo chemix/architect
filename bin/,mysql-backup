@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ,mysql-backup — dump every MySQL/MariaDB database into one compressed file
+# per database, under a dated directory.
+#
+# Successor of an old XAMPP-era script that hardcoded /Applications/XAMPP
+# binary paths and passed the password on the command line. Everything is now
+# configurable (flags or environment), the client binaries are auto-detected
+# (mariadb-dump preferred, mysqldump as fallback), and the password never
+# appears in the process list — it is handed over through a 0600 defaults file
+# in a private temp dir. Dumps are written to a .part file and only renamed
+# once the dump *and* the compressor succeeded, so a truncated dump never ends
+# up looking like a good backup.
+
+prog=${0##*/}
+
+usage() {
+  printf 'Usage: %s [options] [database ...]\n\n' "$prog"
+  cat <<'EOF'
+Dumps each database into <backup-dir>/<date>/<db>.sql.gz. With database names
+given as arguments, only those are dumped; otherwise every database except the
+excluded ones (information_schema, performance_schema, sys by default).
+
+Connection:
+  -u, --user NAME          Login user (default: none — socket/OS auth).
+  -p, --ask-pass           Prompt for the password (never echoed, never in ps).
+      --password-file FILE Read the password from FILE (first line).
+      --defaults-file FILE Take credentials from a my.cnf-style file instead
+                           (e.g. ~/.my.cnf with a [client] section).
+  -H, --host HOST          Server host (default: local socket).
+  -P, --port PORT          Server port.
+  -S, --socket PATH        Unix socket path.
+
+Output:
+  -d, --dir PATH           Backup root (default: ~/backups/mysql).
+      --date-format FMT    date(1) format for the dated subdirectory
+                           (default: %F, e.g. 2026-07-30). Use %F_%H%M%S to
+                           keep several runs of the same day apart.
+  -c, --compress WHICH     gzip (default), zstd or none.
+      --keep N             After a successful run, delete all but the N newest
+                           backup directories (0 = keep everything, default).
+                           Only directories created by this script are pruned.
+
+Behaviour:
+  -x, --exclude DB         Skip this database (repeatable, adds to the
+                           defaults). Use --exclude '' to clear the defaults.
+      --lock-tables        Use --lock-tables instead of --single-transaction
+                           (for MyISAM; locks the whole server while dumping).
+      --no-routines        Dump table data only — no stored procedures, no
+                           functions, no events. Escape hatch for a server
+                           whose mysql.proc / mysql.event is stale after a
+                           version upgrade ("Column count of mysql.proc is
+                           wrong ... use mariadb-upgrade"); the dump is then
+                           incomplete, so fix the server when you can.
+  -n, --dry-run            Show what would be dumped, write nothing.
+  -q, --quiet              Only report errors.
+  -h, --help               Show this help and exit.
+
+Environment (flags win):
+  MYSQL_BACKUP_DIR           Same as --dir.
+  MYSQL_BACKUP_USER          Same as --user.
+  MYSQL_BACKUP_PASSWORD      Password (avoids the prompt; readable via /proc
+                             for the same user, prefer --password-file).
+  MYSQL_BACKUP_DEFAULTS_FILE Same as --defaults-file.
+  MYSQL_BACKUP_DATE_FORMAT   Same as --date-format.
+  MYSQL_BACKUP_KEEP          Same as --keep.
+  MYSQL_BIN / MYSQLDUMP_BIN  Override the auto-detected client binaries.
+
+Examples:
+  # Local MariaDB with socket auth (root is socket-authenticated on Arch):
+  sudo ,mysql-backup --dir /var/backups/mysql --keep 14
+
+  # Remote server, credentials in a my.cnf, one file per DB, zstd:
+  ,mysql-backup --defaults-file ~/.my.cnf -H db.example.com -c zstd
+
+  # Just one database, keeping every run of the day:
+  ,mysql-backup --date-format '%F_%H%M%S' myapp_prod
+
+Exit status:
+    0  every database dumped
+    1  at least one dump failed, or a setup error
+    2  bad command line
+  130  interrupted
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$prog" "$1" >&2
+  exit "${2:-1}"
+}
+
+# --- Options ----------------------------------------------------------------
+backup_dir=${MYSQL_BACKUP_DIR:-$HOME/backups/mysql}
+date_format=${MYSQL_BACKUP_DATE_FORMAT:-%F}
+db_user=${MYSQL_BACKUP_USER:-}
+password=${MYSQL_BACKUP_PASSWORD:-}
+defaults_file=${MYSQL_BACKUP_DEFAULTS_FILE:-}
+keep=${MYSQL_BACKUP_KEEP:-0}
+compress=gzip
+host="" port="" socket=""
+ask_pass=0 password_file="" lock_tables=0 routines=1 dry_run=0 quiet=0
+excludes=(information_schema performance_schema sys)
+databases=()
+
+need_arg() { [ "$2" -ge 2 ] || die "$1 requires an argument." 2; }
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h | --help) usage; exit 0 ;;
+    -u | --user) need_arg "$1" $#; db_user=$2; shift 2 ;;
+    -p | --ask-pass) ask_pass=1; shift ;;
+    --password-file) need_arg "$1" $#; password_file=$2; shift 2 ;;
+    --defaults-file) need_arg "$1" $#; defaults_file=$2; shift 2 ;;
+    -H | --host) need_arg "$1" $#; host=$2; shift 2 ;;
+    -P | --port) need_arg "$1" $#; port=$2; shift 2 ;;
+    -S | --socket) need_arg "$1" $#; socket=$2; shift 2 ;;
+    -d | --dir) need_arg "$1" $#; backup_dir=$2; shift 2 ;;
+    --date-format) need_arg "$1" $#; date_format=$2; shift 2 ;;
+    -c | --compress) need_arg "$1" $#; compress=$2; shift 2 ;;
+    --keep) need_arg "$1" $#; keep=$2; shift 2 ;;
+    -x | --exclude)
+      need_arg "$1" $#
+      if [ -z "$2" ]; then excludes=(); else excludes+=("$2"); fi
+      shift 2
+      ;;
+    --lock-tables) lock_tables=1; shift ;;
+    --no-routines) routines=0; shift ;;
+    -n | --dry-run) dry_run=1; shift ;;
+    -q | --quiet) quiet=1; shift ;;
+    --) shift; databases+=("$@"); break ;;
+    -*) die "unknown option '$1'. Try --help." 2 ;;
+    *) databases+=("$1"); shift ;;
+  esac
+done
+
+case $compress in
+  gzip | zstd | none) ;;
+  *) die "unknown --compress value '$compress' (gzip, zstd, none)." 2 ;;
+esac
+[[ $keep =~ ^[0-9]+$ ]] || die "--keep expects a non-negative number, got '$keep'." 2
+[ -n "$defaults_file" ] && [ -n "$password_file" ] &&
+  die "--defaults-file and --password-file are mutually exclusive." 2
+[ -n "$defaults_file" ] && [ "$ask_pass" -eq 1 ] &&
+  die "--defaults-file and --ask-pass are mutually exclusive." 2
+[ -n "$defaults_file" ] && [ ! -r "$defaults_file" ] &&
+  die "defaults file '$defaults_file' is not readable."
+
+say() { [ "$quiet" -eq 1 ] || printf '%s\n' "$1"; }
+
+# --- Client binaries --------------------------------------------------------
+# MariaDB renamed its clients; the mysql*/mysqldump names still exist as
+# symlinks but print a deprecation notice, so prefer the new ones.
+find_bin() {
+  local candidate
+  for candidate in "$@"; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mysql_bin=${MYSQL_BIN:-$(find_bin mariadb mysql || true)}
+mysqldump_bin=${MYSQLDUMP_BIN:-$(find_bin mariadb-dump mysqldump || true)}
+[ -n "$mysql_bin" ] || die "no 'mariadb' or 'mysql' client found in PATH (set MYSQL_BIN)."
+[ -n "$mysqldump_bin" ] || die "no 'mariadb-dump' or 'mysqldump' found in PATH (set MYSQLDUMP_BIN)."
+
+case $compress in
+  gzip) compressor=("$(find_bin pigz gzip || true)" -c); suffix=.gz ;;
+  zstd) compressor=("$(find_bin zstd || true)" -q -T0 -c); suffix=.zst ;;
+  none) compressor=(cat); suffix="" ;;
+esac
+[ -n "${compressor[0]}" ] || die "compressor for --compress $compress not found in PATH."
+
+# --- Credentials ------------------------------------------------------------
+# Anything passed as --password=... would be visible in ps(1) to every user on
+# the box, so the password goes into a 0600 file in a private temp directory
+# and is handed to the clients via --defaults-extra-file.
+tmp_dir=""
+cleanup() { [ -n "$tmp_dir" ] && rm -rf "$tmp_dir"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+if [ -n "$password_file" ]; then
+  [ -r "$password_file" ] || die "password file '$password_file' is not readable."
+  IFS= read -r password <"$password_file" || true
+elif [ "$ask_pass" -eq 1 ]; then
+  printf 'Password for %s: ' "${db_user:-current user}" >&2
+  IFS= read -rs password </dev/tty
+  printf '\n' >&2
+fi
+
+conn_args=()
+if [ -n "$defaults_file" ]; then
+  conn_args+=(--defaults-file="$defaults_file")
+elif [ -n "$password" ]; then
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/mysql-backup.XXXXXX")
+  cnf="$tmp_dir/client.cnf"
+  (umask 077; : >"$cnf")
+  # Option-file values are double-quote-escaped; backslash and quote must be
+  # escaped so passwords like a"b\c survive intact.
+  esc=${password//\\/\\\\}
+  esc=${esc//\"/\\\"}
+  printf '[client]\npassword="%s"\n' "$esc" >"$cnf"
+  conn_args+=(--defaults-extra-file="$cnf")
+fi
+unset password
+[ -n "$db_user" ] && conn_args+=(--user="$db_user")
+[ -n "$host" ] && conn_args+=(--host="$host")
+[ -n "$port" ] && conn_args+=(--port="$port")
+[ -n "$socket" ] && conn_args+=(--socket="$socket")
+
+# --- Database list ----------------------------------------------------------
+if ! server_dbs=$("$mysql_bin" "${conn_args[@]}" --batch --skip-column-names \
+  -e 'SHOW DATABASES;' 2>&1); then
+  printf '%s\n' "$server_dbs" >&2
+  die "cannot connect to the server / list databases."
+fi
+
+is_excluded() {
+  local db=$1 ex
+  for ex in ${excludes+"${excludes[@]}"}; do
+    [ "$db" = "$ex" ] && return 0
+  done
+  return 1
+}
+
+available=()
+while IFS= read -r db; do
+  [ -n "$db" ] && available+=("$db")
+done <<<"$server_dbs"
+
+targets=()
+if [ ${#databases[@]} -gt 0 ]; then
+  # Explicit list: every name must exist, but honour --exclude as a filter so
+  # `,mysql-backup -x mysql "$(...)"` stays predictable.
+  for db in "${databases[@]}"; do
+    found=0
+    for have in "${available[@]}"; do
+      [ "$db" = "$have" ] && found=1 && break
+    done
+    [ "$found" -eq 1 ] || die "database '$db' does not exist on the server."
+    is_excluded "$db" || targets+=("$db")
+  done
+else
+  for db in "${available[@]}"; do
+    is_excluded "$db" || targets+=("$db")
+  done
+fi
+
+[ ${#targets[@]} -gt 0 ] || die "no databases to back up (everything excluded?)."
+
+dest="$backup_dir/$(date +"$date_format")"
+
+if [ "$dry_run" -eq 1 ]; then
+  printf 'Would dump %d database(s) into %s:\n' "${#targets[@]}" "$dest"
+  for db in "${targets[@]}"; do
+    printf '  %s.sql%s\n' "$db" "$suffix"
+  done
+  [ "$keep" -gt 0 ] && printf 'Would then keep the %d newest backup directories.\n' "$keep"
+  exit 0
+fi
+
+# --- Dump -------------------------------------------------------------------
+dump_args=(--quick --triggers --default-character-set=utf8mb4)
+# Routines and events live in the mysql schema, so they are what breaks on a
+# server that has not been through mariadb-upgrade after a version bump.
+[ "$routines" -eq 1 ] && dump_args+=(--routines --events)
+if [ "$lock_tables" -eq 1 ]; then
+  dump_args+=(--lock-tables)
+else
+  # Consistent snapshot for InnoDB without blocking writers.
+  dump_args+=(--single-transaction --skip-lock-tables)
+fi
+
+mkdir -p "$dest"
+# Marker: --keep only ever deletes directories carrying it, so pointing --dir
+# at a directory with unrelated content cannot lose data.
+: >"$dest/.mysql-backup"
+
+say "Backing up ${#targets[@]} database(s) to $dest"
+failed=()
+for db in "${targets[@]}"; do
+  out="$dest/$db.sql$suffix"
+  if "$mysqldump_bin" "${conn_args[@]}" "${dump_args[@]}" --databases "$db" \
+    2>"$dest/.$db.err" | "${compressor[@]}" >"$out.part"; then
+    mv -f "$out.part" "$out"
+    rm -f "$dest/.$db.err"
+    say "  ok   $db ($(du -h "$out" | cut -f1))"
+  else
+    rm -f "$out.part"
+    printf '%s: FAILED to dump %s\n' "$prog" "$db" >&2
+    sed "s/^/  /" "$dest/.$db.err" >&2 || true
+    failed+=("$db")
+  fi
+done
+
+# --- Retention --------------------------------------------------------------
+if [ "$keep" -gt 0 ] && [ ${#failed[@]} -eq 0 ]; then
+  mapfile -t old < <(
+    find "$backup_dir" -mindepth 2 -maxdepth 2 -name .mysql-backup -printf '%T@ %h\n' |
+      sort -rn | cut -d' ' -f2- | tail -n "+$((keep + 1))"
+  )
+  for dir in ${old+"${old[@]}"}; do
+    say "  prune $dir"
+    rm -rf -- "$dir"
+  done
+fi
+
+# --- Report -----------------------------------------------------------------
+if [ ${#failed[@]} -gt 0 ]; then
+  printf '%s: %d of %d database(s) failed: %s\n' \
+    "$prog" "${#failed[@]}" "${#targets[@]}" "${failed[*]}" >&2
+  printf '%s: error output kept in %s/.<db>.err\n' "$prog" "$dest" >&2
+  exit 1
+fi
+
+say "Done: ${#targets[@]} database(s), $(du -sh "$dest" | cut -f1) in $dest"

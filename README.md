@@ -31,6 +31,13 @@ they're easy to tab-complete and never collide with system commands.
   path of the current directory, the git branch with a clean/dirty work tree flag, the number of
   unfinished `[ ]` items in `./TODO.md` (when the file exists), and the number of `PLAN_*` files
   in the directory. Read-only.
+- **`,mysql-backup`** — dumps every MySQL/MariaDB database into one compressed file per DB under
+  a dated directory. Client binaries are auto-detected (`mariadb-dump`, falling back to
+  `mysqldump`), the password is passed through a 0600 defaults file instead of the command line
+  (never visible in `ps`), and a dump is only kept once both the dump and the compressor
+  succeeded — no silently truncated backups. `--dir`, `--date-format`, `--compress`
+  (gzip/zstd/none), `--exclude`, `--keep N` for retention, `--dry-run`; `,mysql-backup --help`
+  for the rest. Typical local run: `sudo ,mysql-backup --dir /var/backups/mysql --keep 14`.
 
 ### Setup on a new machine
 
