@@ -1,0 +1,5 @@
+# Dev-only type packages (@types/bun, typescript) — reinstall with `bun install`, never needed at runtime
+node_modules/
+
+# Runtime cache written by the status line (usage.json, usage.lock) — machine-local state
+statusline/cache/
