@@ -4,7 +4,8 @@ Two-line status line rendered by Bun.
 
 ![Status line rendering two lines: model with context bar, and rate-limit windows with location](docs/screenshot.png)
 
-The same thing in plain text, which is what survives where the image does not:
+A second example — a different session, in plain text, which is what survives where the image does
+not:
 
 ```
 ◆ Opus 5 [1M] ·xhigh ·think  █▏░ 38%  ⑂ 2×Fable
@@ -20,6 +21,11 @@ The same thing in plain text, which is what survives where the image does not:
 | `5h` / `7d` | Rate-limit windows |
 | `✦ 12%` | Fable weekly quota (`~` suffix = value is stale, refresh in flight) |
 | `Architect ⎇ main*` | Directory and git branch; `*` means uncommitted changes |
+
+Two of those are conditional and are absent from the screenshot for that reason: `⑂` appears only
+while subagents are actually running, and the `*` only while the tree is dirty. The screenshot also
+shows the stale form `5h 7%~` — a window whose reset time has already passed, described under
+[Data sources](#data-sources).
 
 Bar colors compare consumption against elapsed time in the window: green means the remaining
 budget outlasts the remaining time, red means it will not. Pacing is suppressed during the
@@ -74,6 +80,8 @@ and dim; the layout is unaffected.
 
    ```bash
    git clone git@github.com:chemix/architect.git ~/Architect/repo
+   # or, without a GitHub SSH key:
+   git clone https://github.com/chemix/architect.git ~/Architect/repo
    ```
 
 3. **Optionally install the dev dependencies.** Only needed to typecheck; the status line runs
@@ -83,7 +91,7 @@ and dim; the layout is unaffected.
    cd ~/Architect/repo/statusline && bun install
    ```
 
-4. **Point Claude Code at it** by adding a `statusLine` block to `~/.claude/settings.json`:
+4. **Point Claude Code at it** by adding a `statusLine` key to `~/.claude/settings.json`:
 
    ```json
    "statusLine": {
@@ -93,6 +101,10 @@ and dim; the layout is unaffected.
      "refreshInterval": 10
    }
    ```
+
+   That is a fragment, not a whole file: it goes inside the top-level JSON object, alongside
+   whatever keys are already there. On a fresh install `~/.claude/settings.json` may not exist at
+   all, in which case create it as an object wrapping just this key — `{ "statusLine": { … } }`.
 
    Both paths are absolute, and both have to be adjusted if the username or the clone location
    differs. The absolute path to `bun` is deliberate rather than lazy: the command runs in a shell
@@ -118,6 +130,12 @@ weekly quota specifically — the value is matched case-insensitively as a subst
 `scope.model.display_name` in the API response. That is independent of whichever model the session
 is actually using: the screenshot above shows Opus 5 as the active model while `✦` tracks Fable.
 Anyone who mostly runs Opus should change that constant to `'opus'`.
+
+Two Fable-specific leftovers are not covered by that constant. The last-resort fallback is
+hardcoded as `data.seven_day_fable`, and the cache fields are named `fablePct` / `fableResetsAt`.
+Neither breaks anything — the flat `seven_day_*` keys return `null` anyway (see
+[Data sources](#data-sources)), so the fallback never actually fires, and the cache names are
+internal — but rename them too if the mismatch would bother you later.
 
 ## Troubleshooting
 
@@ -169,6 +187,9 @@ Two rules in `bar()` keep it from lying:
 | `usage-refresh.ts` | Detached background fetch of `/api/oauth/usage` |
 | `cache/` | `usage.json` (180s TTL) and `usage.lock` (30s min gap, 300s after a 429) |
 | `docs/screenshot.png` | The screenshot embedded at the top of this file |
+| `package.json` | Empty `dependencies`; `@types/bun` and `typescript` for typechecking only |
+| `tsconfig.json` | `strict`, `noUncheckedIndexedAccess`, `noEmit` — types are a check, not a build |
+| `bun.lock` | Lockfile for those dev dependencies |
 
 ## Data sources
 
