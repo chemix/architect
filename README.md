@@ -12,6 +12,11 @@ they're easy to tab-complete and never collide with system commands.
 - **`,git-status`** — read-only "is everything committed?" check. Clean tree: one line + last
   3 commits. Dirty tree: change counts, a one-sentence AI summary of the changes (Claude haiku,
   falls back to a plain file list when `claude` is unavailable), and the last 3 commits.
+- **`,deploy`** — finds the nearest `bin/deploy` (or `bin/deploy.sh`) by walking up from the
+  current directory and runs it from the project root, passing any arguments through. The search
+  stops at the git repository root. A script found two or more levels up is confirmed first,
+  with its full path, so you never deploy the wrong project by accident; `-y` skips the prompt
+  and `-n` shows what would run.
 
 ### Setup on a new machine
 

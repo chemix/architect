@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+#
+# ,deploy — find the nearest bin/deploy (or bin/deploy.sh) and run it.
+#
+# Walks up from the current directory looking for a "bin" folder that holds a
+# "deploy" or "deploy.sh" script. The search never leaves the current git
+# repository: it stops at the repository root, and outside a repository only the
+# current directory is examined. The script is run from the project root — the
+# parent of the "bin" folder it was found in — with all remaining arguments
+# passed through unchanged.
+#
+# A script found two or more levels above the current directory is confirmed
+# first, showing the full path. At that distance "the nearest bin" is no longer
+# obvious, and deploying the wrong project is the mistake worth preventing.
+
+set -euo pipefail
+
+ASSUME_YES=0
+DRY_RUN=0
+
+usage() {
+    cat <<'EOF'
+Usage: ,deploy [-y|--yes] [-n|--dry-run] [--] [args...]
+
+Find the nearest bin/deploy or bin/deploy.sh, walking up from the current
+directory, and run it from the project root (the parent of that bin folder).
+
+Options:
+  -y, --yes       Run without confirmation, even for a distant script
+  -n, --dry-run   Show what would be run, then exit without running it
+  -h, --help      Show this help and exit
+  --              Stop parsing options; everything after is passed through
+
+Option parsing stops at the first argument that is not listed above, and every
+remaining argument is passed to the deploy script unchanged. Use -- to forward
+an argument that ,deploy would otherwise claim as its own, e.g. ,deploy -- -n.
+
+The search stops at the git repository root; outside a git repository only
+./bin is examined. A script found two or more levels up is confirmed first,
+with its full path.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -y|--yes)
+            ASSUME_YES=1
+            shift
+            ;;
+        -n|--dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ -t 2 ]; then
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+else
+    BOLD=""
+    RESET=""
+fi
+
+# Where the search starts, and how far up it may go. Physical paths on both
+# sides so a symlinked checkout still compares equal to the repository root.
+start=$(pwd -P)
+if boundary=$(git rev-parse --show-toplevel 2>/dev/null); then
+    boundary=$(cd "$boundary" && pwd -P)
+else
+    boundary=$start
+fi
+
+script=""
+project_root=""
+levels=0
+dir=$start
+
+while :; do
+    if [ -f "$dir/bin/deploy" ]; then
+        script="$dir/bin/deploy"
+        project_root="$dir"
+        break
+    fi
+    if [ -f "$dir/bin/deploy.sh" ]; then
+        script="$dir/bin/deploy.sh"
+        project_root="$dir"
+        break
+    fi
+    # Stop after checking the boundary. The "/" and unchanged-parent guards make
+    # the loop terminate even if $start turns out not to be below $boundary.
+    [ "$dir" = "$boundary" ] && break
+    [ "$dir" = "/" ] && break
+    parent=$(dirname "$dir")
+    [ "$parent" = "$dir" ] && break
+    dir=$parent
+    levels=$((levels + 1))
+done
+
+if [ -z "$script" ]; then
+    {
+        echo "No bin/deploy or bin/deploy.sh found between"
+        echo "  $start"
+        echo "and"
+        echo "  $boundary"
+    } >&2
+    exit 1
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "script:  $script"
+    echo "run in:  $project_root"
+    echo "levels:  $levels"
+    echo "args:    $*"
+    exit 0
+fi
+
+if [ "$levels" -ge 2 ] && [ "$ASSUME_YES" -eq 0 ]; then
+    {
+        echo
+        echo "Found a deploy script $levels levels up:"
+        echo
+        echo "  script:  ${BOLD}${script}${RESET}"
+        echo "  run in:  $project_root"
+        [ $# -gt 0 ] && echo "  args:    $*"
+        echo
+    } >&2
+
+    # Read the answer from the terminal, not stdin, so the prompt still works
+    # when ,deploy sits in a pipeline. Opening it is the only reliable test —
+    # /dev/tty can exist and still not be attached to anything.
+    if ! { exec 3</dev/tty; } 2>/dev/null; then
+        echo "Error: no terminal available to confirm. Use --yes to run it anyway." >&2
+        exit 1
+    fi
+
+    printf 'Run it? [y/N] ' >&2
+    reply=""
+    if ! read -r reply <&3; then
+        echo >&2
+    fi
+    exec 3<&-
+    case "$reply" in
+        y|Y|yes|YES) ;;
+        *)
+            echo "Aborted." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+cd "$project_root"
+
+if [ -x "$script" ]; then
+    exec "$script" "$@"
+fi
+
+if [ -r "$script" ]; then
+    echo "Note: $script is not executable, running it with bash (fix with: chmod +x '$script')." >&2
+    exec bash "$script" "$@"
+fi
+
+echo "Error: $script is not readable." >&2
+exit 1
