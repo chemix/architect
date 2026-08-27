@@ -263,9 +263,15 @@ run_claude() {
   : >"$marker"
 
   claude_status=0
-  "${argv[@]}" "$prompt" <"$stdin_file" >"$out_file" 2>"$err_file" || claude_status=$?
+  # 'claude' may be a mise shim whose 'mise use' step prints an activation line
+  # ("mise ~/.config/mise/config.toml tools: claude@...") on STDOUT, which would
+  # end up inside the generated commit message. MISE_QUIET suppresses it.
+  MISE_QUIET=1 "${argv[@]}" "$prompt" <"$stdin_file" >"$out_file" 2>"$err_file" || claude_status=$?
   claude_out=$(cat "$out_file")
   claude_err=$(cat "$err_file")
+  # Belt and braces for mise versions that ignore MISE_QUIET: drop any leading
+  # lines that are clearly mise chatter, not Claude output.
+  claude_out=$(printf '%s\n' "$claude_out" | awk '!seen && /^mise([[:space:]]|$)/ { next } { seen = 1; print }')
 
   # `claude --debug` writes nothing to our stderr; it logs to
   # ~/.claude/debug/<uuid>.txt. That file is where an auth failure, a rate limit
