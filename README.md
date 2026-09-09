@@ -12,6 +12,12 @@ they're easy to tab-complete and never collide with system commands.
 - **`,git-status`** — read-only "is everything committed?" check. Clean tree: one line + last
   3 commits. Dirty tree: change counts, a one-sentence AI summary of the changes (Claude haiku,
   falls back to a plain file list when `claude` is unavailable), and the last 3 commits.
+- **`,git-log`** — scrollable two-pane view of recent commits, built on `fzf`. Top pane lists
+  one commit per line (hash, bold subject, author, age); the bottom pane shows the full message
+  and `--stat` of the highlighted commit. Typing fuzzy-filters the list, arrows move, `Enter`
+  opens the full diff in the pager, `Esc` quits. `-n <count>` sets how many commits to list
+  (default 30); any other
+  arguments are passed to `git log`, e.g. `,git-log -n 10 main..feature -- README.md`.
 - **`,deploy`** — finds the nearest `bin/deploy` (or `bin/deploy.sh`) by walking up from the
   current directory and runs it from the project root, passing any arguments through. The search
   stops at the git repository root. A script found two or more levels up is confirmed first,

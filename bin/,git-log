@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ,git-log — scrollable, two-pane view of recent commits.
+#
+# Top pane:    one commit per line (hash, bold subject, author, relative age).
+# Bottom pane: full commit message + --stat of the highlighted commit.
+#
+# Typing filters the list (fzf fuzzy match on hash, subject and author). Arrows
+# or Ctrl-J/Ctrl-K move, Enter opens the full diff in the pager, Esc quits.
+# Strictly read-only.
+
+usage() {
+  cat <<'USAGE'
+Usage: ,git-log [-n <count>] [<git log revision/path args>...]
+
+Browse recent commits in a two-pane fzf view.
+
+Options:
+  -n <count>   Number of commits to list (default: 30, minimum: 5)
+  -h, --help   Show this help and exit
+
+Type to fuzzy-filter the list. Arrows or Ctrl-J/Ctrl-K navigate, Enter shows
+the full diff in the pager, Esc quits.
+USAGE
+}
+
+count=30
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -n) [ $# -ge 2 ] || { echo "Error: -n requires a number." >&2; exit 1; }
+        count="$2"; shift 2 ;;
+    -n*) count="${1#-n}"; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+[[ "$count" =~ ^[0-9]+$ ]] || { echo "Error: -n expects a number, got '$count'." >&2; exit 1; }
+[ "$count" -ge 5 ] || count=5
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "Error: not inside a git repository." >&2
+  exit 1
+}
+git rev-parse --verify HEAD >/dev/null 2>&1 || { echo "(no commits yet)"; exit 0; }
+command -v fzf >/dev/null 2>&1 || {
+  echo "Error: fzf is required (brew install fzf)." >&2
+  exit 1
+}
+
+# Line layout: <hash>\t<bold subject>\t<dim author, age>. The hash is field {1}
+# in fzf, which is all the preview and Enter action need.
+git log -n "$count" --color=always \
+  --format='%C(yellow)%h%C(reset)%x09%C(bold)%s%C(reset)%x09%C(dim)%an, %cr%C(reset)' "$@" |
+fzf --ansi --no-sort --layout=reverse \
+    --delimiter=$'\t' --with-nth=1,2,3 --tabstop=1 \
+    --prompt='commits > ' \
+    --header='type to filter · Enter full diff · Esc quit' \
+    --preview='git show --color=always --stat --format="%C(yellow)%H%C(reset)%n%C(bold)%s%C(reset)%n%n%b%n%C(dim)%an <%ae> · %ad%C(reset)%n" --date=format:"%Y-%m-%d %H:%M" {1}' \
+    --preview-window='down,55%,wrap,border-top' \
+    --bind='esc:abort' \
+    --bind='enter:execute(git show --color=always {1} | less -R)' \
+    >/dev/null || true
