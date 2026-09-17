@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ,clear — clear the terminal, then show where you are and what is open.
+#
+# After a regular `clear` it prints:
+#   - the full path of the current directory
+#   - the git branch and whether the work tree is clean (when inside a repo)
+#   - the number of unfinished "[ ]" items in ./TODO.md (when the file exists)
+#   - the number of PLAN_* files in the current directory
+#
+# Strictly read-only.
+
+usage() {
+  cat <<'USAGE'
+Usage: ,clear
+
+Clear the terminal, then print the current path, git branch and work tree
+state, the count of open "[ ]" items in ./TODO.md and the count of PLAN_* files.
+
+Options:
+  -h, --help   Show this help and exit
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "Error: unknown argument '$1'." >&2; usage >&2; exit 1 ;;
+esac
+
+# --- Colors (TTY only) -------------------------------------------------------
+if [ -t 1 ]; then
+  green=$'\033[32m'; yellow=$'\033[33m'; bold=$'\033[1m'; dim=$'\033[2m'; reset=$'\033[0m'
+else
+  green=""; yellow=""; bold=""; dim=""; reset=""
+fi
+
+[ -t 1 ] && clear
+
+printf '%s%s%s\n' "$bold" "$PWD" "$reset"
+
+# --- Git ---------------------------------------------------------------------
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  branch=$(git symbolic-ref --short -q HEAD || true)
+  [ -n "$branch" ] || branch="detached at $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+
+  changes=$(git status --porcelain | wc -l | tr -d ' ')
+  if [ "$changes" -eq 0 ]; then
+    state="${green}clean${reset}"
+  else
+    state="${yellow}dirty${reset} ${dim}(${changes} changed)${reset}"
+  fi
+  printf 'git:   %s — %s\n' "$branch" "$state"
+else
+  printf 'git:   %snot a git repository%s\n' "$dim" "$reset"
+fi
+
+# --- TODO.md -----------------------------------------------------------------
+if [ -f TODO.md ]; then
+  open=$( { grep -o '\[ \]' TODO.md || true; } | wc -l | tr -d ' ')
+  if [ "$open" -eq 0 ]; then
+    printf 'todo:  %s0 open%s\n' "$green" "$reset"
+  else
+    printf 'todo:  %s%s open%s\n' "$yellow" "$open" "$reset"
+  fi
+fi
+
+# --- PLAN_* files ------------------------------------------------------------
+shopt -s nullglob
+plans=(PLAN_*)
+shopt -u nullglob
+printf 'plans: %s\n' "${#plans[@]}"

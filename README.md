@@ -23,6 +23,10 @@ they're easy to tab-complete and never collide with system commands.
   stops at the git repository root. A script found two or more levels up is confirmed first,
   with its full path, so you never deploy the wrong project by accident; `-y` skips the prompt
   and `-n` shows what would run.
+- **`,clear`** — runs a regular `clear`, then prints where you are and what is open: the full
+  path of the current directory, the git branch with a clean/dirty work tree flag, the number of
+  unfinished `[ ]` items in `./TODO.md` (when the file exists), and the number of `PLAN_*` files
+  in the directory. Read-only.
 
 ### Setup on a new machine
 
