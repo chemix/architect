@@ -1,262 +1,158 @@
 ---
 description: Přepracuje plánovací soubor (PLAN.md / IDEA_*.md) na praktický implementační TODO.md se stabilními TASK-XXX úkoly, kotvami, závislostmi a kritérii dokončení
-argument-hint: [cesta k plan.md] (výchozí PLAN.md)
+argument-hint: [cesta k plánu] (výchozí PLAN.md)
 ---
 
-Přepracuj plánovací soubor na nový soubor `TODO.md` v rootu projektu.
+# /do-todo
 
-Zdrojový soubor je `$ARGUMENTS`. Pokud je argument prázdný, použij `PLAN.md`.
-V dalším textu se na zdrojový soubor odkazuje jako na `PLAN.md` — pokud je
-předán jiný soubor, dosaď všude jeho skutečnou cestu (i do odkazů v `TODO.md`).
+Převeď plán na `TODO.md` v rootu projektu — implementační dokument, podle kterého
+může další session (člověk nebo agent) postupovat úkol po úkolu, aniž by musela
+znovu procházet celý plán a codebase. Proto musí odpovídat **skutečnému stavu
+codebase**, ne jen přeformulovat plán.
+
+Zdrojový soubor je `$ARGUMENTS`, při prázdném argumentu `PLAN.md`. Dál se o něm
+píše jako o „plánu“; v odkazech v `TODO.md` použij jeho skutečnou cestu.
+
+Výstupem je jen `TODO.md`. Plán neměň, v codebase nic neimplementuj a `TODO.md`
+necommituj, pokud o to uživatel nepožádá.
 
 ## Příprava
 
-1. Přečti zdrojový soubor. Pokud neexistuje, zastav se a řekni si o cestu.
-2. Pokud `TODO.md` v rootu už existuje a obsahuje rozpracované úkoly
-   (odškrtnuté i neodškrtnuté checkboxy), **nepřepisuj ho bez ptaní** — zeptej
-   se, zda přepsat, nebo stavy zachovat.
-3. Nejdříve prostuduj **celý** `PLAN.md` a relevantní části codebase, abys pochopil:
-   - současnou architekturu projektu,
-   - existující implementaci,
-   - použité konvence a návrhové vzory,
-   - soubory a komponenty, kterých se plán týká,
-   - návaznosti mezi jednotlivými kroky,
-   - možné technické překážky, závislosti a blokující podmínky.
+1. Přečti plán. Pokud neexistuje, zeptej se na cestu.
+2. Pokud `TODO.md` už existuje a má rozpracované úkoly, zeptej se, jestli ho
+   přepsat, nebo zachovat stavy a navázat na ně — jsou v něm odškrtnuté výsledky
+   předchozí práce.
+3. Přečti celý plán a prostuduj relevantní části codebase: architekturu,
+   existující implementaci, konvence, dotčené soubory a komponenty, návaznosti
+   mezi kroky a možné technické překážky. U většího plánu můžeš průzkum
+   jednotlivých oblastí rozdělit mezi subagenty; závěry ale ověř a `TODO.md`
+   piš sám, aby byl konzistentní.
 
-Nevytvářej pouze obecný přepis plánu. `TODO.md` musí být praktický implementační
-dokument odpovídající **skutečnému stavu codebase**.
+## Struktura TODO.md
 
-## Požadovaná struktura
+### Přehled
 
-Dokument rozděl do dvou úrovní.
-
-### 1. Přehled
-
-Na začátku `TODO.md` vytvoř:
-
-1. název a stručný popis cíle,
-2. summary současného stavu a plánovaného výsledku,
-3. důležité předpoklady, omezení a nalezené blokující prvky,
-4. obsah ve formě checklistu.
-
-Příklad obsahu:
+1. Název a stručný popis cíle.
+2. Shrnutí současného stavu a plánovaného výsledku.
+3. Důležité předpoklady, omezení, blokující prvky a otevřená rozhodnutí.
+4. Obsah jako checklist hlavních úkolů:
 
 ```markdown
 ## Obsah
 
-- [ ] [TASK-001: Příprava datového modelu](#task-001-priprava-datoveho-modelu)
-- [ ] [TASK-002: Implementace backendové logiky](#task-002-implementace-backendove-logiky)
-- [ ] [TASK-003: Napojení uživatelského rozhraní](#task-003-napojeni-uzivatelskeho-rozhrani)
-- [ ] [TASK-004: Testování a dokončení](#task-004-testovani-a-dokonceni)
+- [ ] [TASK-001: Zavedení databázového modelu](#task-001-zavedeni-databazoveho-modelu)
+- [ ] [TASK-002: Implementace API pro správu profilů](#task-002-implementace-api-pro-spravu-profilu)
+- [ ] [TASK-003: Napojení administračního formuláře](#task-003-napojeni-administracniho-formulare)
 ```
 
-Každý hlavní úkol musí mít:
+### Detailní úkoly
 
-- stabilní identifikátor ve formátu `TASK-001`, `TASK-002`, `TASK-003` atd.,
-- krátký a jednoznačný název,
-- stejný identifikátor a název v obsahu i v detailní sekci,
-- explicitně definovanou Markdown kotvu.
-
-Nepoléhej pouze na automatické generování kotev Markdown rendererem. Nad každý
-detailní úkol vlož **explicitní HTML kotvu**, aby odkazy fungovaly stabilně i po
-úpravách textu:
+Pod obsahem úkoly v pořadí implementace, každý v této podobě:
 
 ```markdown
-<a id="task-001-priprava-datoveho-modelu"></a>
+<a id="task-001-zavedeni-databazoveho-modelu"></a>
 
-## [ ] TASK-001: Příprava datového modelu
-```
+## [ ] TASK-001: Zavedení databázového modelu
 
-Odkaz v obsahu musí používat přesně tuto kotvu:
-
-```markdown
-- [ ] [TASK-001: Příprava datového modelu](#task-001-priprava-datoveho-modelu)
-```
-
-Kotvy vytvářej podle těchto pravidel:
-
-- používej pouze malá písmena,
-- nepoužívej diakritiku,
-- mezery nahrazuj pomlčkami,
-- nepoužívej speciální znaky,
-- identifikátor úkolu (`task-001`) musí být vždy součástí kotvy,
-- jednou vytvořenou kotvu později neměň, pokud se zásadně nezmění význam úkolu.
-
-### 2. Detailní úkoly
-
-Pod obsahem rozepiš jednotlivé úkoly v pořadí, v jakém mají být implementovány.
-Každý úkol musí mít tuto strukturu:
-
-```markdown
-<a id="task-001-priprava-datoveho-modelu"></a>
-
-## [ ] TASK-001: Příprava datového modelu
-
-Krátké vysvětlení cíle úkolu a jeho významu v rámci celého plánu.
+Krátké vysvětlení cíle úkolu a jeho role v celém plánu.
 
 **Kontext z plánu:**
-Odkaz na odpovídající sekci nebo část [`PLAN.md`](./PLAN.md#odpovidajici-sekce).
+Odkaz na odpovídající část [`PLAN.md`](./PLAN.md#odpovidajici-sekce).
 
 **Současný stav:**
-Co již v codebase existuje a na co lze navázat.
+Co už v codebase existuje a na co lze navázat.
 
 **Implementace:**
 
-- [ ] Konkrétní implementační krok
-- [ ] Konkrétní implementační krok
-- [ ] Konkrétní implementační krok
+- [ ] Konkrétní krok
+- [ ] Konkrétní krok
 
 **Dotčené části codebase:**
 
 - `path/to/file`
-- `path/to/component`
 
 **Závislosti:**
 
-- [TASK-000: Název předchozího úkolu](#task-000-nazev-predchoziho-ukolu)
-- knihovny, migrace, konfigurace nebo externí služby.
+- Vyžaduje [TASK-000: Název předchozího úkolu](#task-000-nazev-predchoziho-ukolu).
+- Knihovny, migrace, konfigurace nebo externí služby.
+
+**Blokuje:**
+
+- [TASK-002: Implementace API pro správu profilů](#task-002-implementace-api-pro-spravu-profilu)
 
 **Blokující prvky:**
 
-- nejasnosti nebo chybějící rozhodnutí,
-- nekompatibilita se současnou architekturou,
-- chybějící API, data, oprávnění nebo infrastruktura,
-- technický dluh, který může implementaci zkomplikovat.
+- Problém — dopad — možný způsob odblokování.
 
 **Ověření dokončení:**
 
 - [ ] Konkrétní ověřitelná podmínka
 - [ ] Relevantní testy procházejí
-- [ ] Funkce odpovídá požadavkům z `PLAN.md`
 
 **Výsledek:**
-Jednoznačný popis stavu, který musí po dokončení úkolu existovat.
+Jednoznačný popis stavu, který po dokončení úkolu existuje.
 ```
 
-## Pojmenovávání a propojování úkolů
+Sekce, které pro daný úkol nemají obsah (např. `Blokuje` nebo `Blokující
+prvky`), vynech, místo abys je vyplňoval výplní.
 
-Názvy úkolů musí být:
+## Identifikátory, názvy a kotvy
 
-- stručné a konkrétní,
-- zaměřené na výsledný stav,
-- snadno rozlišitelné od ostatních úkolů,
-- stabilní pro pozdější odkazy,
-- formulované stejným způsobem v obsahu i v detailu.
+`TODO.md` se bude dlouho upravovat a úkoly na sebe odkazují, takže identifikátory
+a kotvy musí zůstat stabilní:
 
-Preferuj názvy jako:
+- Každý hlavní úkol má ID `TASK-001`, `TASK-002`, … a krátký konkrétní název
+  popisující výsledný stav (`Implementace API pro správu profilů`, ne `Backend`,
+  `Další úpravy` nebo `Dokončení`). ID i název jsou v obsahu a v detailu totožné.
+- Nad každým detailním úkolem je explicitní HTML kotva `<a id="…"></a>` —
+  automaticky generované kotvy se liší mezi renderery a mění se s textem nadpisu.
+- Kotva: malá písmena, bez diakritiky, mezery → pomlčky, bez speciálních znaků,
+  vždy začíná ID úkolu (`task-001-…`). Jednou vytvořenou kotvu neměň, pokud se
+  zásadně nezmění význam úkolu.
+- Odkaz na jiný úkol je vždy prokliknutelný a obsahuje ID i název. Vazba
+  „vyžaduje / blokuje“ je uvedená na obou stranách.
 
-- `TASK-001: Zavedení databázového modelu`
-- `TASK-002: Implementace API pro správu profilů`
-- `TASK-003: Napojení administračního formuláře`
+## Stav úkolů
 
-Vyhýbej se obecným názvům jako `Backend`, `Frontend`, `Další úpravy`,
-`Dokončení`, `Implementace`.
+Stav hlavního úkolu je na dvou místech — v obsahu a v nadpisu detailu — a obě
+musí vždy souhlasit (`[ ]` / `[x]`). Při každé změně stavu uprav obě.
 
-Při odkazu na jiný úkol vždy používej prokliknutelný odkaz obsahující jeho
-identifikátor a název:
+Hlavní úkol označ `[x]` jen tehdy, když jsou hotové všechny implementační kroky,
+splněná všechna kritéria z `Ověření dokončení` a potvrzuje to skutečný stav
+codebase. Už při vytváření `TODO.md` označ `[x]` jen to, co codebase jednoznačně
+potvrzuje; částečně hotový úkol nech `[ ]` a do `Současný stav` napiš, co už
+existuje.
 
-```markdown
-[TASK-002: Implementace API pro správu profilů](#task-002-implementace-api-pro-spravu-profilu)
-```
+## Pravidla obsahu
 
-Stejný způsob odkazování používej v sekcích `Závislosti`, `Blokující prvky`,
-`Související úkoly` i v popisech implementačního pořadí.
+- Úkoly jsou konkrétní, samostatně proveditelné a ověřitelné; rozsáhlé části
+  plánu rozděl na menší navazující úkoly.
+- Pořadí určují skutečné technické závislosti, ne pořadí v plánu.
+- Používej názvy, cesty a terminologii z projektu. Soubory uváděj jen tehdy, když
+  je z codebase spolehlivě znáš; nevymýšlej API, moduly ani detaily, které
+  neexistují.
+- Nejasnosti explicitně označ jako rozhodnutí, které je potřeba udělat, a uveď
+  je i v přehledu.
+- Blokující prvky odvozuj z plánu a codebase a u každého uveď dopad a možné
+  odblokování.
+- Zachovej odkazy na odpovídající části plánu kvůli širšímu kontextu.
 
-Pokud úkol blokuje jiný úkol, uveď tuto vazbu **na obou stranách**:
+## Kontrola konzistence
 
-```markdown
-**Závislosti:**
+Po vytvoření i po každé pozdější úpravě `TODO.md` ověř — ideálně mechanicky,
+např. krátkým skriptem nebo `grep` nad ID a kotvami, ne jen očima:
 
-- Vyžaduje dokončení [TASK-001: Zavedení databázového modelu](#task-001-zavedeni-databazoveho-modelu).
-```
+- každý `TASK-XXX` je v obsahu právě jednou a má právě jednu detailní sekci
+  s explicitní kotvou,
+- ID, název a stav `[ ]` / `[x]` souhlasí mezi obsahem a detailem,
+- všechny odkazy (z obsahu i mezi úkoly) vedou na existující kotvy,
+- vazby závislostí jsou na obou stranách a pořadí úkolů je respektuje.
 
-```markdown
-**Blokuje:**
+Před dokončením navíc zkontroluj, že každý bod plánu pokrývá aspoň jeden úkol,
+nechybí žádný zásadní implementační krok a každý úkol má jasná kritéria
+dokončení.
 
-- [TASK-002: Implementace API pro správu profilů](#task-002-implementace-api-pro-spravu-profilu)
-```
+## Závěr
 
-## Synchronizace stavů úkolů
-
-Každý hlavní úkol má svůj stav uvedený na dvou místech:
-
-1. v checklistu v obsahu,
-2. v nadpisu detailně rozepsaného úkolu.
-
-Nedokončený úkol:
-
-```markdown
-- [ ] [TASK-001: Příprava datového modelu](#task-001-priprava-datoveho-modelu)
-```
-
-```markdown
-## [ ] TASK-001: Příprava datového modelu
-```
-
-Dokončený úkol:
-
-```markdown
-- [x] [TASK-001: Příprava datového modelu](#task-001-priprava-datoveho-modelu)
-```
-
-```markdown
-## [x] TASK-001: Příprava datového modelu
-```
-
-Při každé pozdější změně stavu hlavního úkolu vždy aktualizuj **oba** checkboxy
-současně. Nesmí vzniknout stav, kdy je úkol v obsahu označen jako dokončený, ale
-v detailu zůstává nedokončený (nebo naopak).
-
-Po každé aktualizaci `TODO.md` proveď kontrolu konzistence:
-
-- každý `TASK-XXX` je v obsahu uveden právě jednou,
-- každý `TASK-XXX` má právě jednu detailní sekci,
-- stav `[ ]` / `[x]` je na obou místech shodný,
-- název úkolu je na obou místech shodný,
-- odkaz z obsahu vede na správnou kotvu,
-- odkazy mezi úkoly vedou na existující kotvy.
-
-Hlavní úkol označ jako `[x]` pouze tehdy, pokud:
-
-- jsou dokončeny všechny jeho implementační kroky,
-- jsou splněna všechna kritéria v části `Ověření dokončení`,
-- výsledek lze potvrdit podle skutečného stavu codebase.
-
-Nestačí pouze změnit checkbox v detailních podúkolech.
-
-## Pravidla zpracování
-
-- Úkoly musí být konkrétní, samostatně proveditelné a ověřitelné.
-- Rozděl příliš rozsáhlé části plánu na menší navazující úkoly.
-- Seřaď úkoly podle skutečných technických závislostí, ne pouze podle pořadí v `PLAN.md`.
-- Využij názvy, cesty, komponenty a terminologii skutečně používanou v projektu.
-- Uváděj konkrétní soubory pouze tehdy, pokud je lze spolehlivě určit z codebase.
-- Nevymýšlej neexistující API, moduly ani implementační detaily.
-- Nejasnosti explicitně označ jako rozhodnutí, které je nutné udělat.
-- Přidej blokující prvky, které lze rozumně odvodit z `PLAN.md` nebo codebase.
-- U každého blokujícího prvku popiš jeho dopad a případný způsob odblokování.
-- Zachovej odkazy na původní části `PLAN.md`, aby bylo možné snadno dohledat širší kontext.
-- Již dokončené části označ `[x]` pouze tehdy, pokud jejich dokončení jednoznačně potvrzuje codebase.
-- Pokud je implementace pouze částečná, ponech hlavní úkol jako `[ ]` a popiš, co již existuje.
-- **Neměň obsah `PLAN.md`.**
-- **Neimplementuj samotné změny v codebase. Výstupem této práce je pouze propracovaný `TODO.md`.**
-
-## Závěrečná kontrola
-
-Před dokončením práce ověř, že:
-
-- každý bod z `PLAN.md` je pokryt alespoň jedním úkolem,
-- žádný zásadní implementační krok nechybí,
-- pořadí úkolů respektuje jejich závislosti,
-- každý hlavní úkol má unikátní identifikátor,
-- každý hlavní úkol má stabilní explicitní kotvu,
-- všechny odkazy z obsahu fungují,
-- všechny odkazy mezi úkoly fungují,
-- checklist v obsahu odpovídá detailním úkolům,
-- stav checkboxů je na obou místech synchronizovaný,
-- názvy úkolů jsou v obsahu a detailu totožné,
-- jednotlivé úkoly mají jasná kritéria dokončení,
-- blokující prvky jsou propojené s úkoly, kterých se týkají.
-
-Na závěr vypiš krátké shrnutí: počet úkolů, nalezené blokující prvky a otevřená
-rozhodnutí. `TODO.md` necommituj bez vyzvání.
+Vypiš krátké shrnutí: počet úkolů, nalezené blokující prvky, otevřená rozhodnutí
+a výsledek kontroly konzistence (případně co se nepodařilo ověřit).
