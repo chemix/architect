@@ -96,6 +96,46 @@ Jednoznačný popis stavu, který po dokončení úkolu existuje.
 Sekce, které pro daný úkol nemají obsah (např. `Blokuje` nebo `Blokující
 prvky`), vynech, místo abys je vyplňoval výplní.
 
+Vazbu bez blokace (úkoly spolu souvisí, ale ani jeden nečeká na druhý) zapiš
+do volitelné sekce `**Související úkoly:**` — nikdy ne do `Závislosti`.
+
+## Strojově čitelný formát (náhled v nástrojích)
+
+`TODO.md` se otevírá v nástrojích, které ho parsují (modul „Plán" v otomanu,
+plan-viewer): seznam úkolů s progressem, graf závislostí, validace. Parser je
+přísný — co nesedí, se tiše přiřadí jinam nebo se ztratí. Proto navíc platí:
+
+- **Právě jedno `## Obsah`.** Před ním jen `# Název` a libovolné `##`
+  sekce přehledu. Obsah končí prvním `##`, `---` nebo kotvou `<a id>`.
+- **Položka obsahu přesně** `- [ ] [TASK-001: Název](#task-001-nazev)`, jedna
+  na řádek. Mezi položkami smí být nadpisy fází `### Fáze 1 — …`; odsazený
+  řádek pod položkou je její poznámka (hodí se na prioritu nebo „čeká na …").
+  Žádné jiné odrážky v obsahu.
+- **Detail úkolu** = řádek `<a id="task-001-…"></a>` a pod ním nadpis
+  `## [ ] TASK-001: Název`. ID má vždy tři číslice.
+- **Jen známé labely sekcí:** `Kontext z plánu`, `Současný stav`,
+  `Implementace`, `Dotčené části codebase`, `Závislosti`, `Blokuje`,
+  `Související úkoly`, `Blokující prvky`, `Ověření dokončení`, `Výsledek`
+  (v podobě `**Label:**` na začátku řádku). Neznámý label (např.
+  `**Priorita:**`, `**Poznámka:**`) parser nepozná a jeho obsah přilepí
+  k předchozí sekci — prioritu proto piš do úvodního odstavce úkolu nebo do
+  poznámky v obsahu.
+- **Hrany grafu vznikají jen z odkazů `#task-…` v `Závislosti`** (a jejich
+  protistrany v `Blokuje`). Odkaz na úkol, který neblokuje, patří do
+  `Související úkoly` — v `Závislosti` by udělal z úkolu blokovaný.
+  Checklisty `- [ ]` v `Implementace` a `Ověření dokončení` se počítají do
+  progressu úkolu.
+- **Každá zmínka o jiném úkolu je plný odkaz** `[TASK-002: Název](#task-002-…)`,
+  i v přehledu a koncových sekcích — holé `TASK-002` ani `#2` nepoužívej.
+- **Uvnitř úkolu žádné `## ` nadpisy** (ani na začátku řádku v code blocku) —
+  každé `##` úkol ukončí. Podnadpisy jako `###` nebo tučný text jsou v pořádku.
+- **Neúkolový obsah na konec** (nápady, backlog, odložené, otevřené otázky):
+  jako `##` sekce *bez* checkboxu za posledním úkolem, uvnitř smí mít `###`.
+  Nepoužívej za obsahem `# ` (H1) — parser ho přilepí k poslednímu úkolu.
+- **Otevřená rozhodnutí** můžeš v přehledu vést jako tabulku
+  `| R1 | Co rozhodnout | blokuje [TASK-004: …](#task-004-…) |`; úkol, který na
+  rozhodnutí čeká, uvede `R1` v `Závislosti` a náhled ho ukáže jako blokovaný.
+
 ## Identifikátory, názvy a kotvy
 
 `TODO.md` se bude dlouho upravovat a úkoly na sebe odkazují, takže identifikátory
@@ -146,7 +186,12 @@ např. krátkým skriptem nebo `grep` nad ID a kotvami, ne jen očima:
   s explicitní kotvou,
 - ID, název a stav `[ ]` / `[x]` souhlasí mezi obsahem a detailem,
 - všechny odkazy (z obsahu i mezi úkoly) vedou na existující kotvy,
-- vazby závislostí jsou na obou stranách a pořadí úkolů je respektuje.
+- vazby závislostí jsou na obou stranách a pořadí úkolů je respektuje,
+- žádný neznámý `**Label:**`, žádné holé `TASK-XXX` mimo obsah a nadpisy,
+  žádné `##` uvnitř úkolů (pravidla z „Strojově čitelný formát“).
+
+Pokud máš k dispozici náhled (otoman: panel Soubory → „Plán“ → tab Validace),
+musí být bez chyb.
 
 Před dokončením navíc zkontroluj, že každý bod plánu pokrývá aspoň jeden úkol,
 nechybí žádný zásadní implementační krok a každý úkol má jasná kritéria
