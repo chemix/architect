@@ -41,7 +41,7 @@ Match the committed files against `DEPLOY.md` and tell the user which of its ste
 
 ## DEPLOY.md
 
-A short, versioned file in the repository root that answers: *after committing these files, what has to be checked or done before the change is live?* It holds only project-specific steps; the commit flow itself stays here. Keep it to a verification gate plus a table keyed by changed paths — no prose runbooks (link to them instead). Neither `/log-session` nor any other command performs these steps on its own.
+A short, versioned file in the repository root that answers: *after committing these files, what has to be checked or done before the change is live?* It holds only project-specific steps; the commit flow itself stays here. Keep it to a verification gate, an optional **Release** section (what `/deploy` runs) and a table keyed by changed paths — no prose runbooks (link to them instead). `/log-session` never performs these steps; `/deploy` runs only the **Release** section, after the user confirms. A project without a Release section simply can't use `/deploy`.
 
 ```markdown
 # DEPLOY.md
@@ -53,6 +53,15 @@ restart services or touch the server always need the user's confirmation.
 
 `npm run check` (types + tests) must pass. For a running-app check without
 touching production: `scripts/dev-instance.sh`.
+
+## Release
+
+Production runs `main` from `/srv/myapp`.
+
+- **Command:** `sudo systemctl restart myapp` (drops active connections → confirm first)
+- **Verify:** `systemctl is-active myapp` → `active`; `curl -fsS localhost:8080/healthz` → 200
+- **On failure:** `journalctl -u myapp -n 40 --no-pager`
+- **Never:** restart the database unit; run migrations against production by hand
 
 ## Steps by changed files
 
