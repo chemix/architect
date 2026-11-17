@@ -35,7 +35,9 @@ How it works now
 [optional] Deploy notes
   Only when releasing this commit needs something beyond the
   project's normal flow (a migration, config change, restart,
-  manual step). Most commits don't need this section.
+  manual step). Most commits don't need this section. When the
+  repository has a `DEPLOY.md`, take the steps from it (its
+  format is described in `/log-session`).
 
 [optional] Follow-ups
   Open threads, deferred work, known gaps. One bullet each.
@@ -70,6 +72,15 @@ Avoid:
 
 If a session changed a form *and* fixed an unrelated auth bug, that is two commits. Split them even when one combined commit would look tidier; separate commits can be reverted, bisected, and read on their own.
 
+## Unattended commits
+
+`,auto-git` (and anything else that commits without a human in the loop) follows
+the same shape, with two limits: it sees only the diff, so it writes `Why` only
+when the reason is evident from the diff itself and never invents one — a short
+`What` is enough; and it takes the subject convention from the recent
+`git log`, like everyone else. The script adds the `Co-Authored-By` trailer
+itself, so the generated message must not contain one.
+
 ## Co-Authored-By
 
 Substantive commits that an AI agent co-authored carry a trailer naming the model that actually wrote the change. When the harness supplies an attribution line (Claude Code does, via a system reminder), use it verbatim — it takes precedence over this file. Otherwise use the current model's name, for example:
@@ -98,7 +109,7 @@ Don't copy a model name from older commits — it is likely out of date. Trivial
 1. `git status` — nothing unintended staged.
 2. `git diff --staged` — the message should be defensible against exactly this diff.
 3. No secrets, local config, credentials, or stray build artifacts staged.
-4. The project's own gate for this kind of change has passed (tests, linters, type checks, a manual check for user-facing changes). Look for it in the README, CONTRIBUTING, AGENTS.md / CLAUDE.md, or the package manifest's scripts. If something wasn't run, say so in the message instead of implying it was.
+4. The project's own gate for this kind of change has passed (tests, linters, type checks, a manual check for user-facing changes). Look for it in `DEPLOY.md`, the README, CONTRIBUTING, AGENTS.md / CLAUDE.md, or the package manifest's scripts. If something wasn't run, say so in the message instead of implying it was.
 
 ## Writing new skills and commands in the same spirit
 
