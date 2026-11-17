@@ -8,7 +8,10 @@ Personal command-line scripts. They use a leading-comma naming convention (`,aut
 they're easy to tab-complete and never collide with system commands.
 
 - **`,auto-git`** — stages all changes and asks Claude (`claude --print`) to group the staged
-  diff into one or more logically cohesive conventional commits. Run it from inside any git repo.
+  diff into one or more logically cohesive commits (format: the `git-activity` skill in
+  `agent/skills/` — subject in the repo's existing convention, optional Why / What body, `Co-Authored-By` trailer via
+  `AUTO_GIT_CO_AUTHOR`). A safety guard unstages likely secrets (`.env`, private keys,
+  credentials) and files over `AUTO_GIT_MAX_FILE_MB` and commits nothing. Run it from inside any git repo.
   `,auto-git --help` for usage; `,auto-git --debug` when it misbehaves — it reports each Claude
   call with its exit code, stdout and stderr, checks the OAuth token expiry, explains why a
   commit plan was rejected, and collects the Claude CLI's own API log (`~/.claude/debug/`) into

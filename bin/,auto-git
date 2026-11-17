@@ -33,13 +33,30 @@ Options:
                         or an oversized request actually shows up. Use
                         --debug=none to skip that pass-through.
 
+Commit format follows the `git-activity` skill (agent/skills/git-activity): a
+terse subject in the convention of the repo's recent history (Conventional
+Commits if it uses them, otherwise a lowercase area word + imperative, at most
+60 chars), an optional Why / What body, and a Co-Authored-By trailer.
+
+Safety guard: before asking Claude, the staged set is checked for files that
+look like secrets or local config (.env, .env.*, *.pem, *.key, *.p12, *.pfx,
+id_rsa/id_ecdsa/id_ed25519 private keys, credentials.json, .netrc, .pgpass,
+*.kdbx) and for files over the size limit. Such files are unstaged and nothing
+is committed; the rest stays staged. Add them to .gitignore, or override.
+
 Environment:
   AUTO_GIT_DEBUG=1           Same as --debug.
   AUTO_GIT_CLAUDE_DEBUG=api  Same as the FILTER above.
+  AUTO_GIT_CO_AUTHOR=...     Co-Authored-By trailer value
+                             (default "Claude <noreply@anthropic.com>";
+                             set to an empty string to omit the trailer).
+  AUTO_GIT_MAX_FILE_MB=5     Size limit per staged file for the safety guard.
+  AUTO_GIT_ALLOW_SENSITIVE=1 Skip the safety guard.
 
 Exit status:
     0  commits created, or nothing to commit
-    1  a step failed — your changes are left staged
+    1  a step failed, or the safety guard stopped the run — your changes
+       are left staged (except the files the guard unstaged)
     2  bad command line
   130  interrupted
 
@@ -85,6 +102,27 @@ if [ $# -gt 0 ]; then
   usage >&2
   exit 2
 fi
+
+co_author=${AUTO_GIT_CO_AUTHOR-Claude <noreply@anthropic.com>}
+max_file_mb=${AUTO_GIT_MAX_FILE_MB:-5}
+case $max_file_mb in '' | *[!0-9]*)
+  printf "Error: AUTO_GIT_MAX_FILE_MB must be a whole number of megabytes.\n" >&2
+  exit 2
+  ;;
+esac
+allow_sensitive=0
+case "${AUTO_GIT_ALLOW_SENSITIVE:-}" in 1 | true | yes | on) allow_sensitive=1 ;; esac
+
+# git commit with the Co-Authored-By trailer (when configured). --trailer keeps
+# it in git's trailer block instead of relying on Claude to format it.
+commit_with_trailer() {
+  local msg=$1
+  if [ -n "$co_author" ]; then
+    git commit -m "$msg" --trailer "Co-Authored-By: $co_author"
+  else
+    git commit -m "$msg"
+  fi
+}
 
 # Debugging without the CLI's own API log is only half a diagnosis, so opt in by
 # default; --debug=none opts back out.
@@ -354,6 +392,49 @@ if git diff --cached --quiet; then
 fi
 stop_spinner
 
+# --- Safety guard ------------------------------------------------------------
+# This script commits unattended (also from otoman's queue), so `git add -A`
+# must not silently sweep a secret or a huge binary into history. Only added
+# or modified paths are checked (a deletion can't leak anything).
+if [ "$allow_sensitive" -eq 0 ]; then
+  flagged=()
+  flagged_why=()
+  max_bytes=$((max_file_mb * 1024 * 1024))
+  while IFS= read -r -d '' f; do
+    base=${f##*/}
+    reason=""
+    case $base in
+      .env.example | .env.sample | .env.template | .env.dist | *.pub) ;;
+      .env | .env.* | *.pem | *.key | *.p12 | *.pfx | *.kdbx | \
+        id_rsa* | id_ecdsa* | id_ed25519* | id_dsa* | \
+        credentials.json | .credentials.json | .netrc | .pgpass)
+        reason="looks like a secret or local config"
+        ;;
+    esac
+    if [ -z "$reason" ]; then
+      size=$(git cat-file -s ":$f" 2>/dev/null) || size=0
+      if [ "$size" -gt "$max_bytes" ]; then
+        reason="larger than ${max_file_mb} MB ($((size / 1024 / 1024)) MB)"
+      fi
+    fi
+    if [ -n "$reason" ]; then
+      flagged+=("$f")
+      flagged_why+=("$reason")
+    fi
+  done < <(git diff --cached --name-only -z --diff-filter=d)
+
+  if [ ${#flagged[@]} -gt 0 ]; then
+    echo "Error: safety guard stopped the commit; these files were unstaged:" >&2
+    for i in "${!flagged[@]}"; do
+      printf '  %s — %s\n' "${flagged[$i]}" "${flagged_why[$i]}" >&2
+    done
+    git reset -q -- "${flagged[@]}"
+    echo "  Nothing was committed; the remaining changes stay staged." >&2
+    echo "  Add them to .gitignore, or re-run with AUTO_GIT_ALLOW_SENSITIVE=1 if they are meant to be committed." >&2
+    exit 1
+  fi
+fi
+
 if ! command -v claude >/dev/null 2>&1; then
   echo "Error: 'claude' is not in PATH; cannot generate commit messages." >&2
   echo "Your changes remain staged — commit them manually." >&2
@@ -401,6 +482,12 @@ if [ "$valid" = true ] && ! command -v jq >/dev/null 2>&1; then
   fallback_reason="'jq' is not installed"
 fi
 
+# Subject convention comes from the repo's own history (git-activity).
+recent_log=$(git log --oneline -15 2>/dev/null || true)
+subject_rule="Subject: follow the convention of the recent commit subjects below — if they use Conventional Commits (type(scope): summary), use them too; if there is no clear convention, use a lowercase area word + imperative (e.g. 'api return 404 for unknown ids'). Imperative, no trailing period, at most 60 chars.
+Recent commit subjects:
+${recent_log:-(none — new repository)}"
+
 plan=""
 if [ "$valid" = true ]; then
   # Ask Claude to group the changed files into one or more logical commits.
@@ -416,9 +503,13 @@ Rules:
 - Every file listed above MUST appear in exactly ONE commit. Never invent, rename,
   split, or omit a path.
 - Prefer fewer commits; only split when changes are genuinely independent.
-- Each message: conventional commit style (feat:, fix:, refactor:, docs:, chore:,
-  etc), first line under 72 chars. Add a blank line then bullet points only if it
-  helps.
+- Each message follows this format (the project's git-activity convention):
+  * ${subject_rule}
+  * Body (omit for trivial changes): a blank line, then a \`Why\` section ONLY
+    if the reason is evident from the diff itself — never invent motivation —
+    and a \`What\` section with a few bullets on the intent of the change, not
+    a restatement of the diff.
+  * Do NOT add a Co-Authored-By or any other trailer; it is added automatically.
 
 Output ONLY valid JSON, nothing else, in exactly this shape:
 {\"commits\":[{\"message\":\"<msg>\",\"files\":[\"path1\",\"path2\"]}]}"
@@ -476,7 +567,8 @@ if [ "$valid" = false ]; then
   echo "Grouping unavailable${fallback_reason:+ ($fallback_reason)} — falling back to a single commit."
   start_spinner "Generating commit message"
   run_claude message "$diff_file" \
-    "Generate a concise git commit message for these changes. Output ONLY the commit message, nothing else. Use conventional commit style (feat:, fix:, refactor:, docs:, chore:, etc). Keep the first line under 72 chars. If there are multiple changes, add a blank line then bullet points."
+    "Generate a git commit message for these changes. Output ONLY the commit message, nothing else. ${subject_rule}
+Body (omit for trivial changes): a blank line, then a Why section only if the reason is evident from the diff itself (never invent motivation) and a What section with a few bullets on the intent. Do NOT add a Co-Authored-By or any other trailer."
   stop_spinner
   if [ "$claude_status" -ne 0 ]; then
     report_claude_failure "generating a commit message"
@@ -498,7 +590,7 @@ if [ "$valid" = false ]; then
   echo "---"
   echo "$message"
   echo "---"
-  if ! git commit -m "$message"; then
+  if ! commit_with_trailer "$message"; then
     echo "Error: git commit failed." >&2
     echo "Your changes remain staged — commit them manually." >&2
     exit 1
@@ -540,7 +632,7 @@ for i in $(seq 0 $((count - 1))); do
   echo "---"
   # On a mid-loop failure, report what was committed and re-stage everything
   # so the user is never left in a confusing half-committed state. (M2)
-  if ! git commit -m "$msg"; then
+  if ! commit_with_trailer "$msg"; then
     echo "Error: commit $((i + 1)) of $count failed." >&2
     echo "$created commit(s) were created successfully before the failure." >&2
     echo "Re-staging all remaining changes so nothing is lost." >&2
