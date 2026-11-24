@@ -29,6 +29,8 @@ Redesign mění formu, ne fakta. Adresy, časy, ceny, jména a kontakty přeber 
 
 Klient tak dostane web, který mluví jeho fakty, a rozhodnutí o vlastních sloganech zůstane na něm.
 
+Stejně opatrně zacházej s chybějícími podklady (zástupná fotka, prázdné PDF): na stránce je nech tak, jak jsou, a ve shrnutí napiš, co je potřeba dodat. Nepřidávej na web vlastní texty typu „Fotka bude doplněna“ – návštěvník je uvidí a klient o nich nerozhodl.
+
 ## 3. Najdi, co je na současném vzhledu „vibe“
 
 Projdi stránku a vypiš znaky generického AI vzhledu (seznam je ve `frontend-design`). Na rcdomecek to byly:
@@ -38,7 +40,7 @@ Projdi stránku a vypiš znaky generického AI vzhledu (seznam je ve `frontend-d
 - stejné zaoblené karty se stínem na všem,
 - šipky „→“ za odkazy, číslování 01/02/03 u věcí, které nejsou posloupnost.
 
-Další časté: meta řádky s tečkami („Spolek · Praha · od 2010“), jedno slovo nadpisu zvýrazněné barvou/kurzívou, monospace popisky, fade-up animace každé sekce (AOS apod.), hero se statistikami. Do nového návrhu je nepřenášej ani v jemnější podobě (eyebrow malými písmeny je pořád eyebrow, „→“ v `aria-hidden` je pořád šipka).
+Další časté: meta řádky s tečkami („Spolek · Praha · od 2010“), jedno slovo nadpisu zvýrazněné barvou/kurzívou, monospace popisky, fade-up animace každé sekce (AOS apod.), hero se statistikami. Do nového návrhu je nepřenášej ani v jemnější podobě (eyebrow malými písmeny je pořád eyebrow, „→“ v `aria-hidden` je pořád šipka). Totéž platí pro karty: řada stejných zaoblených boxů s podkladem zůstává „SaaS kartovou mřížkou“, i když dostane zdobný okraj, barevnou hlavičku nebo vlnku. Rozvrh, ceník nebo seznam akcí jsou data – patří do sloupců, řádků nebo tabulky oddělených linkami a mezerami, ne do krabiček.
 
 Uživateli je stručně pojmenuj – vysvětluje to, proč se mění.
 
@@ -96,7 +98,8 @@ agent-browser screenshot --full <scratchpad>/390.png
 ```
 
 - Před `scrollIntoView` nastav `document.documentElement.style.scrollBehavior='auto'`, jinak screenshot zachytí rozjetý scroll.
-- Screenshoty si opravdu prohlédni a kriticky zhodnoť (jeden „doplněk“ odeber).
+- Screenshoty si opravdu prohlédni a kriticky zhodnoť (jeden „doplněk“ odeber). Projdi celou výšku stránky, ne jen hero: přechody mezi sekcemi, odsazení poslední sekce a **patičky** (text nesmí lepit na okraj), zalamování dlouhých nadpisů na 390 px. Chyby na konci stránky se přehlédnou nejsnáz, protože pozornost zůstane u výrazného prvku nahoře.
+- Zeptej se: vypadá některá sekce jako řada stejných krabiček? Pokud ano, přestav ji (viz krok 3).
 - HTTP: stránka 200, hash odpovídá souboru, fonty `font/woff2` 200, `README.md` 403, `sudo nginx -t`.
 - Oprávnění: `chemix:webdev`, adresáře `2775`, soubory `0664`.
 
