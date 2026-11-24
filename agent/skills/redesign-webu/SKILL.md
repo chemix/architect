@@ -1,6 +1,6 @@
 ---
 name: redesign-webu
-description: Vizuální redesign malého statického webu (jedna stránka, nginx, bez buildu) tak, aby nepůsobil jako generický „vibe-coded“ web – hravě, ale důvěryhodně, s vlastními barvami a písmy, bez externích požadavků. Použij, když uživatel chce „předělat vzhled“, „méně vibe styl“, „redesign“, „aby to nevypadalo jako od AI“ u statického webu v /var/www/*/public.
+description: Vizuální redesign malého statického webu (jedna stránka, nginx, bez buildu) tak, aby nepůsobil jako generický „vibe-coded“ web – hravě, ale důvěryhodně, s vlastními barvami a písmy, bez externích požadavků. Použij, když uživatel chce u existujícího webu „předělat vzhled“, „nový styl“, nové barvy, typografii nebo rozložení, „méně vibe styl“, „redesign“ nebo „aby to nevypadalo jako od AI“ – i když nezmíní cestu, nginx ani AI (typicky weby spolků, školek, klubů a malých firem v /var/www/*/public). Nepoužívej na samotné texty, doplnění obsahu, opravy chyb ani nový web od nuly.
 argument-hint: "[volitelně: cesta k index.html nebo požadovaný směr]"
 ---
 
